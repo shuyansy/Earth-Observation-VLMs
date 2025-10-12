@@ -52,7 +52,7 @@ pip install -r requirements.txt
 ## Quick Start With HuggingFace
 
 <details>
-    <summary>Example Code</summary>
+    <summary>Example Code (single modality infer)</summary>
     
 ```python
 import argparse
@@ -157,6 +157,101 @@ if __name__ == "__main__":
 ```
 </details>
 
+
+<details>
+    <summary>Example Code (multi modality infer)</summary>
+```python
+import argparse
+import os
+import torch
+from PIL import Image
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+import cv2
+try:
+    from mmengine.visualization import Visualizer
+except ImportError:
+    Visualizer = None
+    print("Warning: mmengine is not installed, visualization is disabled.")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Video Reasoning Segmentation')
+    parser.add_argument('--image_path', default="data/pair_data/test/rgb/img/dfc2023_test_P_0456.png", help='Path to image file')
+    parser.add_argument('--sar_image_path', default="data/pair_data/test/sar/img/dfc2023_test_P_0456.png", help='Path to image file')
+    parser.add_argument('--model_path', default="/data/Earthmind_proj/final_retrain_multi")
+    parser.add_argument('--work-dir', default="result", help='The dir to save results.')
+    parser.add_argument('--text', type=str, default="<image>Please describe the image.")
+    parser.add_argument('--select', type=int, default=-1)
+    args = parser.parse_args()
+    return args
+
+
+def visualize(pred_mask, image_path, work_dir):
+    visualizer = Visualizer()
+    img = cv2.imread(image_path)
+    visualizer.set_image(img)
+    visualizer.draw_binary_masks(pred_mask, colors='g', alphas=0.4)
+    visual_result = visualizer.get_image()
+
+    output_path = os.path.join(work_dir, os.path.basename(image_path))
+    cv2.imwrite(output_path, visual_result)
+
+if __name__ == "__main__":
+    cfg = parse_args()
+    model_path = cfg.model_path
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype="auto",
+        device_map="cuda:0",
+        trust_remote_code=True
+    )
+
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path,
+        trust_remote_code=True
+    )
+
+
+    img_path=cfg.image_path
+    image_paths=[img_path]
+ 
+    img = Image.open(img_path).convert('RGB')
+
+
+    sar_img_path=cfg.sar_image_path
+    sar_img = Image.open(sar_img_path).convert('RGB')
+
+
+
+    print(f"Selected frame {cfg.select}")
+    print(f"The input is:\n{cfg.text}")
+    result = model.predict_forward_multi(
+        image=sar_img,
+        rgb_image=img,
+        text=cfg.text,
+        tokenizer=tokenizer,
+    )
+  
+    prediction = result['prediction']
+    print(f"The output is:\n{prediction}")
+
+    if '[SEG]' in prediction and Visualizer is not None:
+        _seg_idx = 0
+        pred_masks = result['prediction_masks'][_seg_idx]
+        for frame_idx in range(len(vid_frames)):
+            pred_mask = pred_masks[frame_idx]
+            if cfg.work_dir:
+                os.makedirs(cfg.work_dir, exist_ok=True)
+                visualize(pred_mask, image_paths[frame_idx], cfg.work_dir)
+            else:
+                os.makedirs('./temp_visualize_results', exist_ok=True)
+                visualize(pred_mask, image_paths[frame_idx], './temp_visualize_results')
+    else:
+        pass
+```
+</details>
 
 ## Training
 Please download the training data and pretrained weights into the data folder and pretrained folder, and then run the following code. We recommend using 8 A100 GPUs for training. 

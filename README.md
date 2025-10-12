@@ -1,5 +1,5 @@
 
-## EarthMind: Towards Multi-Granular and Multi-Sensor Earth Observation with Large Multimodal Models
+## EarthMind: Leveraging Cross-Sensor Data for Advanced Earth Observation Interpretation with a Unified Multimodal LLM
 <p align="center">
     🌐 <a href="" target="_blank">Blog</a> | 📃 <a href="https://arxiv.org/abs/2506.01667" target="_blank">Paper</a> | 🤗 <a href="https://huggingface.co/sy1998/EarthMind-4B" target="_blank">Model</a> |  🤗 <a href="https://huggingface.co/datasets/sy1998/EarthMind-data" target="_blank">Training_Data</a> | 🤗 <a href="https://huggingface.co/datasets/sy1998/EarthMind-Bench" target="_blank">Benchmarks</a> |  🎥 <a href="" target="_blank">Demo</a>
 

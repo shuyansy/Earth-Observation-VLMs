@@ -38,7 +38,7 @@
 - [2025/05/29] 🔥 EarthMind is released,  including data, model weight, training and evaluation code. 
 
 ## Model weights
-Please download our pre-trained weights from the [link](https://huggingface.co/sy1998/EarthMind-Pretrain) and finetuned model weights from the [link](https://huggingface.co/sy1998/EarthMind-4B). 
+Please download our pre-trained weights from the [link](https://huggingface.co/sy1998/EarthMind-Pretrain) and finetuned model weights from the [link](https://huggingface.co/sy1998/EarthMind-4B) (For single sensor scenarios) and [link](https://huggingface.co/sy1998/EarthMind4B_multi) (for multi sensor scenarios).
   
 ## Installation 
 ```bash

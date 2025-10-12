@@ -250,8 +250,12 @@ if __name__ == "__main__":
                 visualize(pred_mask, image_paths[frame_idx], './temp_visualize_results')
     else:
         pass
-```
+
 </details>
+```
+
+
+
 
 ## Training
 Please download the training data and pretrained weights into the data folder and pretrained folder, and then run the following code. We recommend using 8 A100 GPUs for training. 
@@ -269,6 +273,7 @@ After training, please run the following script to convert models to hf format:
 export PYTHONPATH="./:$PYTHONPATH"
 python projects/llava_sam2/hf/convert_to_hf.py projects/llava_sam2/configs/earthmind_4b_sft.py --pth-model work_dirs/earthmind_4b_sft/iter_252380.pth --save-path your_model_path
 ```
+
 
 ## Evaluation
 For image-level evaluation (scene classification, VQA and captioning), you can run 

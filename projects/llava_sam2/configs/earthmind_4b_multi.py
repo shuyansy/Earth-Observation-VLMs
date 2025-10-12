@@ -28,7 +28,7 @@ from projects.llava_sam2.models.preprocess.image_resize import DirectResize
 #######################################################################
 # Model
 path = 'pretrained/InternVL2_5-4B'
-pretrained_pth = "pretrained/iter_112588.pth"
+pretrained_pth = "/data/Earthmind_proj/work_dirs/earthmind_4b_sft/iter_229472.pth"
 
 # Data
 template = "phi3_chat"
@@ -284,22 +284,22 @@ georegion_dataset = dict(
 
 train_dataset = dict(
     type=ConcatDataset, datasets=[
-        rrsisd_segm_dataset,refsegrs_segm_dataset,risbench_segm_dataset,
-        rrsisd_segm_dataset,refsegrs_segm_dataset,risbench_segm_dataset,
-        rrsisd_segm_dataset,refsegrs_segm_dataset,risbench_segm_dataset,
-        vrs_vqa_dataset,
-        earthgpt_vqa_dataset,
-        geochat_vqa_dataset,
-        ms_vqa_dataset,
-        rsvg_dataset,
-        rsvg_dataset,
-        rsvg_dataset,
-        rsvg_dataset,
-        rsvg_dataset,
-        georegion_dataset, 
-        vrsbench_segm_dataset
-        # sar_segm_dataset,
-        # sar_vqa_dataset,
+        # rrsisd_segm_dataset,refsegrs_segm_dataset,risbench_segm_dataset,
+        # rrsisd_segm_dataset,refsegrs_segm_dataset,risbench_segm_dataset,
+        # rrsisd_segm_dataset,refsegrs_segm_dataset,risbench_segm_dataset,
+        # vrs_vqa_dataset,
+        # earthgpt_vqa_dataset,
+        # geochat_vqa_dataset,
+        # ms_vqa_dataset,
+        # rsvg_dataset,
+        # rsvg_dataset,
+        # rsvg_dataset,
+        # rsvg_dataset,
+        # rsvg_dataset,
+        # georegion_dataset, 
+        # vrsbench_segm_dataset
+        sar_segm_dataset,
+        sar_vqa_dataset,
     ]
 )
 train_dataloader = dict(

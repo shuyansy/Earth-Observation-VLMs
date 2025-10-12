@@ -164,6 +164,11 @@ Please download the training data and pretrained weights into the data folder an
  bash tools/dist.sh train projects/llava_sam2/configs/earthmind_4b_sft.py 8
 ```
 
+Based on the trained weight on single-modality RS data, continue training in multi-sensor data.
+```bash
+ bash tools/dist.sh train projects/llava_sam2/configs/earthmind_4b_multi.py 8
+```
+
 After training, please run the following script to convert models to hf format:
 ```bash
 export PYTHONPATH="./:$PYTHONPATH"

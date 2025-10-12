@@ -201,7 +201,7 @@ bash earthmind-bench.sh
 
 
 ## Training Data
-We have released our training data in [link](https://huggingface.co/datasets/sy1998/EarthMind-data).
+We have released our training data in [link](https://huggingface.co/datasets/sy1998/EarthMind-data) and [link](https://huggingface.co/datasets/sy1998/Multisensor_RS_Data/tree/main).
 
 ## EarthMind-Bench
 

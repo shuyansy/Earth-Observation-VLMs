@@ -160,6 +160,7 @@ if __name__ == "__main__":
 
 <details>
     <summary>Example Code (multi modality infer)</summary>
+    
 ```python
 import argparse
 import os
@@ -250,9 +251,8 @@ if __name__ == "__main__":
                 visualize(pred_mask, image_paths[frame_idx], './temp_visualize_results')
     else:
         pass
-
-</details>
 ```
+</details>
 
 
 

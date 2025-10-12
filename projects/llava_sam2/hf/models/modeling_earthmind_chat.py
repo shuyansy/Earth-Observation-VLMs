@@ -1,9 +1,10 @@
+
 # --------------------------------------------------------
 # InternVL
 # Copyright (c) 2024 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-
+from math import sqrt
 import warnings
 from typing import Any, List, Optional, Tuple, Union
 
@@ -113,7 +114,9 @@ class Sa2VAChatModel(PreTrainedModel):
         self.ps_version = config.ps_version
         self.llm_arch_name = config.llm_config.architectures[0]
 
-        self.local_query = nn.Parameter(torch.randn(2, 2048)) 
+
+
+        self.hca_tau = 1.0 
 
         use_flash_attn = use_flash_attn if has_flash_attn else False
         config.vision_config.use_flash_attn = True if use_flash_attn else False
@@ -549,6 +552,20 @@ class Sa2VAChatModel(PreTrainedModel):
     ) -> torch.LongTensor:
         device = self.device
         assert self.img_context_token_id is not None
+        input_embeds = self.language_model.get_input_embeddings()(input_ids.to(device))
+        QUESTION_START_TOKEN_ID = 151666
+
+        # 找到最后一个151666的位置
+        question_start_positions = (input_ids[0] == QUESTION_START_TOKEN_ID).nonzero(as_tuple=True)[0]
+
+        if len(question_start_positions) > 0:
+            # 从151666之后开始提取
+            question_start = question_start_positions[-1].item() + 1
+            text_embeds_question = input_embeds[:, question_start:, :]  # (1, M_question, D)
+        else:
+            # 备用：如果没找到，用全部
+            text_embeds_question = input_embeds
+            print("[WARNING] 151666 not found, using full input_embeds")
 
         if pixel_values is not None:
             if visual_features is not None:
@@ -571,14 +588,69 @@ class Sa2VAChatModel(PreTrainedModel):
 
                 vit_embeds = self.extract_feature(pixel_values.to(device))
                 rgb_vit_embeds = self.extract_feature(rgb_pixel_values.to(device))
-                vit_embeds = torch.cat([vit_embeds, rgb_vit_embeds], dim=1)  # 10, 512, 2048
+
+
+                if rgb_vit_embeds.shape[0] != vit_embeds.shape[0]:
+                    # 对batch维度进行平均池化，保持后两个维度不变
+                    rgb_vit_embeds = rgb_vit_embeds.mean(dim=0, keepdim=True)
+                    print("after avgpooling:", rgb_vit_embeds.shape)
+                # 输入特征 - 显式clone
+                X_sar = vit_embeds.clone()  # 完全复制
+                X_rgb = rgb_vit_embeds.clone()  # 完全复制
+
+                eps=1e-6
+                tau_txt = 0.2
+            
+                X_rgb_norm = X_rgb / (X_rgb.norm(dim=-1, keepdim=True) + eps)
+                X_sar_norm = X_sar / (X_sar.norm(dim=-1, keepdim=True) + eps)
+
+      
+                def compute_token_quality(X_norm, tau=0.1):
+                 
+                    A = F.softmax(torch.matmul(X_norm, X_norm.transpose(-2, -1)) / tau, dim=-1)
+                    entropy = -(A * torch.log(A + 1e-10)).sum(dim=-1)
+                    # 归一化：熵越低质量越高
+                    quality = 1 - (entropy - entropy.min()) / (entropy.max() - entropy.min() + 1e-6)
+                    return quality
+
+                quality_rgb = compute_token_quality(X_rgb_norm, tau=0.1)  # (B, N)
+                quality_sar = compute_token_quality(X_sar_norm, tau=0.1)  # (B, N)
+
+             
+                
+                text_norm = text_embeds_question / (text_embeds_question.norm(dim=-1, keepdim=True) + eps)
+                relevance_rgb = torch.matmul(X_rgb_norm, text_norm.transpose(1, 2)) / tau_txt
+                relevance_sar = torch.matmul(X_sar_norm, text_norm.transpose(1, 2)) / tau_txt
+
+                beta_rgb = relevance_rgb.max(dim=-1)[0]  # (B, N)
+                beta_sar = relevance_sar.max(dim=-1)[0]  # (B, N)
+
+             
+           
+           
+                alpha_quality = F.softmax(torch.stack([quality_rgb, quality_sar], dim=-1), dim=-1)  # (B, N, 2)
+
+             
+                alpha_txt = F.softmax(torch.stack([beta_rgb, beta_sar], dim=-1), dim=-1)  # (B, N, 2)
+
+                alpha = 0.7 * alpha_txt + 0.3 * alpha_quality  # 可调整比例
+
+                alpha_rgb = alpha[..., 0:1]
+                alpha_sar = alpha[..., 1:2]
+
+
+              
+                vit_embeds_fused = alpha_rgb * X_rgb + alpha_sar * X_sar
+                vit_embeds=vit_embeds_fused
+
+                print("#### Fused embeddings shape:", vit_embeds.shape)
            
             image_flags = torch.sum(pixel_values, dim=(1, 2, 3)) != 0
             image_flags = image_flags.long()
             vit_embeds = vit_embeds[image_flags == 1]
            
 
-            input_embeds = self.language_model.get_input_embeddings()(input_ids.to(device))
+            
             B, N, C = input_embeds.shape
             input_embeds = input_embeds.reshape(B * N, C)
 
@@ -647,7 +719,7 @@ class Sa2VAChatModel(PreTrainedModel):
      
         # print("generate",encode_outputs.hidden_states[-1][0].shape)
         encode_feature=encode_outputs.hidden_states[-1][0]
-        return outputs,encode_feature,encode_outputs.attentions
+        return outputs,encode_feature,encode_outputs.attentions,(alpha_rgb,alpha_sar)
 
     def preparing_for_generation(self, tokenizer, max_new_tokens=2048, torch_dtype=torch.bfloat16):
         # set stop criteria and generation configs for model
@@ -783,7 +855,7 @@ class Sa2VAChatModel(PreTrainedModel):
                     self.grounding_encoder.preprocess_image(pixel) for pixel in extra_pixel_values
                 ]).to(self.torch_dtype)
 
-                images = dynamic_preprocess(image, self.min_dynamic_patch,
+                images,weight = dynamic_preprocess(image, self.min_dynamic_patch,
                                             self.max_dynamic_patch,
                                             self.image_size, self.use_thumbnail)
 
@@ -898,11 +970,6 @@ class Sa2VAChatModel(PreTrainedModel):
     
 
 
-
-
-
-
-
     def predict_forward_multi(
             self,
             image=None,
@@ -965,7 +1032,7 @@ class Sa2VAChatModel(PreTrainedModel):
                 input_dict['vp_overall_mask'] = None
             else:
                 ori_image_size = image.size
-
+               
                 # prepare grounding images
                 g_image = np.array(image)  # for grounding
                 g_image = self.extra_image_processor.apply_image(g_image)
@@ -975,14 +1042,11 @@ class Sa2VAChatModel(PreTrainedModel):
                     self.grounding_encoder.preprocess_image(pixel) for pixel in extra_pixel_values
                 ]).to(self.torch_dtype)
 
-                images = dynamic_preprocess(image, self.min_dynamic_patch,
+                images,sta = dynamic_preprocess(image, self.min_dynamic_patch,
                                             self.max_dynamic_patch,
                                             self.image_size, self.use_thumbnail)
                 
-
-                rgb_images = dynamic_preprocess(rgb_image, self.min_dynamic_patch,
-                                            self.max_dynamic_patch,
-                                            self.image_size, self.use_thumbnail)
+                
                 
 
 
@@ -995,11 +1059,34 @@ class Sa2VAChatModel(PreTrainedModel):
                 pixel_values = [self.transformer(image) for image in images]
                 pixel_values = torch.stack(pixel_values).to(self.torch_dtype)
 
-                
-                rgb_pixel_values = [self.transformer(image) for image in rgb_images]
-                rgb_pixel_values = torch.stack(rgb_pixel_values).to(self.torch_dtype)
+                if type(rgb_image) is list:
+                    pixel_values_list = []
+                    for img_rgb_like in rgb_image:
+                        sub_images,_ = dynamic_preprocess(
+                            img_rgb_like,
+                            self.min_dynamic_patch,
+                            self.max_dynamic_patch,
+                            self.image_size,
+                            self.use_thumbnail
+                        )
+                        pixel_values_list.extend([self.transformer(si) for si in sub_images])
 
-                num_image_tokens = pixel_values.shape[0] * self.patch_token *2
+                    rgb_pixel_values = torch.stack(pixel_values_list).to(self.torch_dtype)  # 形状：[M_total, 3, 44
+                    
+                else:
+                    rgb_images,sta = dynamic_preprocess(rgb_image, self.min_dynamic_patch,
+                                                self.max_dynamic_patch,
+                                                self.image_size, self.use_thumbnail)
+                        
+
+
+                    
+                    rgb_pixel_values = [self.transformer(image) for image in rgb_images]
+                    rgb_pixel_values = torch.stack(rgb_pixel_values).to(self.torch_dtype)
+
+                print("input",rgb_pixel_values.shape,pixel_values.shape)
+
+                num_image_tokens = pixel_values.shape[0] * self.patch_token 
                 num_frames = 1
             input_dict['g_pixel_values'] = g_pixel_values
             input_dict['pixel_values'] = pixel_values
@@ -1066,7 +1153,7 @@ class Sa2VAChatModel(PreTrainedModel):
                 'vp_overall_mask': input_dict['vp_overall_mask'],
             }
 
-        generate_output,encode_feature,encode_attention = self.generate_multi(
+        generate_output,encode_feature,encode_attention,vis_weight = self.generate_multi(
             **mm_inputs,
             generation_config=self.gen_config,
             streamer=None,
@@ -1108,7 +1195,7 @@ class Sa2VAChatModel(PreTrainedModel):
             masks = masks.cpu().numpy()
             ret_masks.append(masks)
 
-        return {'prediction': predict, 'prediction_masks': ret_masks,}
+        return {'prediction': predict, 'prediction_masks': ret_masks,'vis_weight':vis_weight,"sta":sta}
 
 def get_seg_hidden_states(hidden_states, output_ids, seg_id):
     seg_mask = output_ids == seg_id
@@ -1158,6 +1245,11 @@ def dynamic_preprocess(image,
     target_height = image_size * target_aspect_ratio[1]
     blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
 
+    cols=target_aspect_ratio[0]
+    rows=target_aspect_ratio[1]
+
+    
+
     # resize the image
     resized_img = image.resize((target_width, target_height))
     processed_images = []
@@ -1173,7 +1265,7 @@ def dynamic_preprocess(image,
     if use_thumbnail and len(processed_images) != 1:
         thumbnail_img = image.resize((image_size, image_size))
         processed_images.append(thumbnail_img)
-    return processed_images
+    return processed_images,(cols,rows)
 
 
 from transformers.cache_utils import Cache, DynamicCache
@@ -1233,4 +1325,5 @@ def prepare_inputs_for_generation_phi3(
         }
     )
     return model_inputs
+
 

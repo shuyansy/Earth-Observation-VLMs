@@ -17,7 +17,7 @@
 
 
 <p align="center">
-    <img src="./asset/pipeline.png" width="900">
+    <img src="./asset/new.png" width="900">
 </p>
 
 

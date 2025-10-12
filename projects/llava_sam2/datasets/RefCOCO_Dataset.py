@@ -564,7 +564,7 @@ class Multi_ReferSegmDataset(Multi_RefCocoDataset):
                 if image_token_str is None and '<image>' in msg['value']:
                     msg['value'] = msg['value'].replace('<image>', '')
                 if '<image>' in msg['value']:
-                    msg['value'] = msg['value'].replace('<image>', image_token_str*2).strip()
+                    msg['value'] = msg['value'].replace('<image>', image_token_str).strip()
                 input += msg['value'].strip()
             elif msg['from'] == 'gpt':
                 out_conversation.append({

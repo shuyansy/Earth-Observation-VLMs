@@ -32,6 +32,201 @@ from projects.glamm.utils import DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DE
 from .utils import dynamic_preprocess
 
 
+import os
+import numpy as np
+import torch
+import torch.nn.functional as F
+from PIL import Image
+
+
+
+
+import os, re
+import numpy as np
+from PIL import Image
+
+_BAND_RE = re.compile(r"_B(\d{2}|8A)\b", re.IGNORECASE)
+
+def _read_band(fp):
+    arr = np.array(Image.open(fp))
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    return arr
+
+def _resize_to(arr, H, W):
+    if arr.shape == (H, W):
+        return arr
+    return np.array(Image.fromarray(arr).resize((W, H), resample=Image.BILINEAR))
+
+def _stretch_to_uint8(a: np.ndarray):
+    # 2–98 分位拉伸，便于可视化/兼容常规 RGB transform
+    a = a.astype(np.float32)
+    v = a[np.isfinite(a)]
+    if v.size == 0:
+        return np.zeros_like(a, dtype=np.uint8)
+    p2, p98 = np.percentile(v, 2), np.percentile(v, 98)
+    if p98 - p2 < 1e-6:
+        return np.zeros_like(a, dtype=np.uint8)
+    a = (a - p2) / (p98 - p2)
+    a = np.clip(a, 0, 1)
+    return (a * 255.0).astype(np.uint8)
+
+def ms_folder_to_rgb_and_extra_groups(
+    image_folder: str,
+    to_uint8: bool = True,
+    pad_mode: str = "repeat"  # "repeat" 或 "zero"：最后一组不满 3 通道的填充策略
+):
+    """
+    返回若干 PIL.Image（RGB 模式）：
+      [0] = 标准 RGB：B04(红), B03(绿), B02(蓝)
+      [1..] = 其余通道按 3 个一组组成的“伪 RGB”
+    """
+    tifs = [os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.lower().endswith(".tif")]
+    if not tifs:
+        raise ValueError(f"No images found in folder: {image_folder}")
+
+    band_to_file = {}
+    for fp in tifs:
+        m = _BAND_RE.search(os.path.basename(fp))
+        if m:
+            band_to_file["B" + m.group(1).upper()] = fp
+
+    # 必须有 B02,B03,B04
+    for b in ("B02", "B03", "B04"):
+        if b not in band_to_file:
+            raise RuntimeError(f"Missing required band {b} in {image_folder}")
+
+    # 读取三波段 + 对齐尺寸
+    r = _read_band(band_to_file["B04"])
+    g = _read_band(band_to_file["B03"])
+    b = _read_band(band_to_file["B02"])
+    H = max(r.shape[0], g.shape[0], b.shape[0])
+    W = max(r.shape[1], g.shape[1], b.shape[1])
+    r = _resize_to(r, H, W); g = _resize_to(g, H, W); b = _resize_to(b, H, W)
+
+    if to_uint8:
+        R = Image.fromarray(_stretch_to_uint8(r), mode='L')
+        G = Image.fromarray(_stretch_to_uint8(g), mode='L')
+        B = Image.fromarray(_stretch_to_uint8(b), mode='L')
+    else:
+        # 若你有别的归一化方案，可以在这里改
+        R = Image.fromarray(_stretch_to_uint8(r), mode='L')
+        G = Image.fromarray(_stretch_to_uint8(g), mode='L')
+        B = Image.fromarray(_stretch_to_uint8(b), mode='L')
+
+    images = [Image.merge('RGB', (R, G, B))]  # 第 0 张：标准 RGB
+
+    # 其余通道顺序（按 Sentinel-2 常见 12 波段，去掉 02,03,04）
+    rest = ["B05","B06","B07","B8A","B11","B12","B01","B09"]
+    rest_files = [band_to_file[b] for b in rest if b in band_to_file]
+
+    # 读并对齐到同一尺寸
+    rest_arrs = []
+    for fp in rest_files:
+        a = _read_band(fp)
+        a = _resize_to(a, H, W)
+        rest_arrs.append(a)
+
+    # 按 3 通道一组组成伪 RGB
+    i = 0
+    while i < len(rest_arrs):
+        group = rest_arrs[i:i+3]
+        if len(group) < 3:
+            if pad_mode == "repeat":
+                while len(group) < 3:
+                    group.append(group[-1])
+            else:  # zero
+                while len(group) < 3:
+                    group.append(np.zeros_like(group[0], dtype=group[0].dtype))
+        if to_uint8:
+            R = Image.fromarray(_stretch_to_uint8(group[0]), mode='L')
+            G = Image.fromarray(_stretch_to_uint8(group[1]), mode='L')
+            B = Image.fromarray(_stretch_to_uint8(group[2]), mode='L')
+        else:
+            R = Image.fromarray(_stretch_to_uint8(group[0]), mode='L')
+            G = Image.fromarray(_stretch_to_uint8(group[1]), mode='L')
+            B = Image.fromarray(_stretch_to_uint8(group[2]), mode='L')
+        images.append(Image.merge('RGB', (R, G, B)))
+        i += 3
+
+    return images
+
+
+
+# 1) 读取一个 sample 目录下的所有 .tif → [C,H,W]
+def read_tif_stack(image_folder: str) -> torch.Tensor:
+    files = sorted(
+        f for f in os.listdir(image_folder) if f.lower().endswith(".tif")
+    )
+    if not files:
+        raise ValueError(f"No .tif found: {image_folder}")
+    arrs = []
+    H0 = W0 = None
+    for f in files:
+        a = np.array(Image.open(os.path.join(image_folder, f)))
+        if a.ndim == 3:  # 偶尔会读到 HxWx3，取第0通道
+            a = a[..., 0]
+        if H0 is None:
+            H0, W0 = a.shape
+        elif a.shape != (H0, W0):
+            # 如需强制对齐到第一张的分辨率
+            a = np.array(Image.fromarray(a).resize((W0, H0), resample=Image.BILINEAR))
+        arrs.append(a.astype(np.float32))
+    x = np.stack(arrs, axis=0)  # [C,H,W]
+    return torch.from_numpy(x)
+
+# 2) 选择最接近宽高比的网格 (cols, rows)，与你原来的 target_ratios 一致
+def find_closest_grid(aspect: float, min_num=1, max_num=6):
+    cands = [(i, j) for n in range(min_num, max_num+1)
+             for i in range(1, n+1) for j in range(1, n+1)
+             if 1 <= i*j <= max_num and i*j >= min_num]
+    # 与原逻辑一致：先按块数排序，再挑 i/j 最接近当前宽高比
+    cands = sorted(cands, key=lambda x: x[0]*x[1])
+    best = min(cands, key=lambda ij: abs((ij[0]/ij[1]) - aspect))
+    return best  # (cols, rows)
+
+# 3) 纯张量版“动态切块”：输入 [C,H,W]，输出 [M,C,S,S]（S=image_size）
+def dynamic_tile_tensor(chw: torch.Tensor,
+                        image_size: int = 448,
+                        min_num: int = 1,
+                        max_num: int = 6,
+                        use_thumbnail: bool = False):
+    assert chw.ndim == 3, f"expect [C,H,W], got {chw.shape}"
+    C, H, W = chw.shape
+    aspect = W / H
+    cols, rows = find_closest_grid(aspect, min_num, max_num)   # 与你原函数一致的网格选择
+    target_w = cols * image_size
+    target_h = rows * image_size
+
+    # 先整体 resize 到规则尺寸（与原函数先 resize 再均匀切块一致）
+    x = chw.unsqueeze(0)            # [1,C,H,W]
+    x = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=False)  # [1,C,H',W']
+    x = x.squeeze(0)                # [C,H',W']
+
+    # 均匀切成 cols*rows 个 tile
+    tiles = []
+    for r in range(rows):
+        for c in range(cols):
+            y0 = r * image_size
+            x0 = c * image_size
+            crop = x[:, y0:y0+image_size, x0:x0+image_size]    # [C,S,S]
+            tiles.append(crop)
+    out = torch.stack(tiles, dim=0)  # [M,C,S,S], M=cols*rows
+
+    # 可选 thumbnail：按原逻辑在多块时追加一张整图缩略图
+    if use_thumbnail and out.shape[0] != 1:
+        thumb = F.interpolate(chw.unsqueeze(0), size=(image_size, image_size),
+                              mode="bilinear", align_corners=False).squeeze(0)  # [C,S,S]
+        out = torch.cat([out, thumb.unsqueeze(0)], dim=0)  # [M+1,C,S,S]
+    return out, (cols, rows)
+
+# 4) （可选）按通道归一化：强烈建议用“全数据集统计”的 mean/std
+def normalize_per_channel(batched: torch.Tensor, mean: torch.Tensor, std: torch.Tensor):
+    # batched: [M,C,S,S], mean/std: [C]
+    std = torch.where(std == 0, torch.ones_like(std), std)
+    return (batched - mean[None, :, None, None]) / std[None, :, None, None]
+
+
 class InfinityMMDataset(Dataset):
     os.environ['TOKENIZERS_PARALLELISM'] = 'true'
     IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
@@ -366,93 +561,52 @@ class MS_LLaVADataset(Dataset):
         if self.skip_pure_text and data_dict.get('image', None) is None:
             return None
 
-        # if data_dict.get('image', None) is not None:
-        #     image_file = os.path.join(self.image_folder, data_dict['image'])
-        #     try:
-        #         image = Image.open(image_file).convert('RGB')
-        #     except Exception as e:
-        #         print(f'Error: {e}', flush=True)
-        #         print_log(f'Error: {e}', logger='current')
-        #         return None
-        #     if self.preprocessor is not None:
-        #         images = [image]
-        #         if self.arch_type == 'qwen':
-        #             _data_dict = self.preprocessor(images, do_resize=True)
-        #             _data_dict['pixel_values'] = torch.tensor(_data_dict['pixel_values'], dtype=torch.float)
-        #             _data_dict['image_grid_thw'] = torch.tensor(_data_dict['image_grid_thw'], dtype=torch.int)
-        #             num_image_tokens = int(_data_dict['image_grid_thw'][0].prod() * (self.downsample_ratio ** 2))
-        #         elif self.arch_type == 'llava':
-        #             _data_dict = self.preprocessor(images, do_resize=True, size=(self.image_size, self.image_size))
-        #             _data_dict['pixel_values'] = np.stack(_data_dict['pixel_values'], axis=0)
-        #             _data_dict['pixel_values'] = torch.tensor(_data_dict['pixel_values'], dtype=torch.float)
-        #             num_image_tokens = _data_dict['pixel_values'].shape[0] * self.patch_token
-        #         else:
-        #             raise NotImplementedError
-        #         out_data_dict.update(_data_dict)
-        #     else:
-        #         images = dynamic_preprocess(image, self.min_dynamic_patch,
-        #                                     self.max_dynamic_patch,
-        #                                     self.image_size, self.use_thumbnail)
-        #         pixel_values = [self.transformer(image) for image in images]
-        #         pixel_values = torch.stack(pixel_values)
-        #         out_data_dict['pixel_values'] = pixel_values
-
-        #         num_image_tokens = pixel_values.shape[0] * self.patch_token
-        #     image_token_str = f'{self.IMG_START_TOKEN}' \
-        #                       f'{self.IMG_CONTEXT_TOKEN * num_image_tokens}' \
-        #                       f'{self.IMG_END_TOKEN}'
-        #     token_dict = self.get_inputid_labels(
-        #         data_dict['conversations'], image_token_str)
-        #     out_data_dict.update(token_dict)
+      
 
         if data_dict.get('image', None) is not None:
-            image_folder = os.path.join(self.image_folder, data_dict['image']).replace(".png","")
+            image_folder = os.path.join(self.image_folder, data_dict['image'])
 
            
-            # 获取所有符合要求的图片（按文件名排序）
-            image_files = sorted([
-                os.path.join(image_folder, f)
-                for f in os.listdir(image_folder)
-                if f.lower().endswith('.png') and f.startswith('rgb_')
-            ])
+            # # 获取所有符合要求的图片（按文件名排序）
+            # image_files = sorted([
+            #     os.path.join(image_folder, f)
+            #     for f in os.listdir(image_folder)
+            #     if f.lower().endswith('.tif') 
+            # ])
 
-            if not image_files:
-                raise ValueError(f"No images found in folder: {image_folder}")
+            # if not image_files:
+            #     raise ValueError(f"No images found in folder: {image_folder}")
+    
+            # image = ms_folder_to_rgb_pil(image_folder, to_uint8=True)
 
-            images = [Image.open(f).convert('RGB') for f in image_files]
+            # images = dynamic_preprocess(image, self.min_dynamic_patch,
+            #                                 self.max_dynamic_patch,
+            #                                 self.image_size, self.use_thumbnail)
+            # pixel_values = [self.transformer(image) for image in images]
+            # pixel_values = torch.stack(pixel_values)
+            # out_data_dict['pixel_values'] = pixel_values
 
-        
-            # 使用指定 preprocessor 处理
-            if self.preprocessor is not None:
-                if self.arch_type == 'qwen':
-                    _data_dict = self.preprocessor(images, do_resize=True)
-                    _data_dict['pixel_values'] = torch.tensor(_data_dict['pixel_values'], dtype=torch.float)
-                    _data_dict['image_grid_thw'] = torch.tensor(_data_dict['image_grid_thw'], dtype=torch.int)
-                    num_image_tokens = int(_data_dict['image_grid_thw'][0].prod() * (self.downsample_ratio ** 2))
+            # 从 12 个 .tif 中得到：1 张标准 RGB + 若干组伪 RGB
+            rgb_like_images = ms_folder_to_rgb_and_extra_groups(image_folder, to_uint8=True, pad_mode="repeat")
 
-                elif self.arch_type == 'llava':
-                    _data_dict = self.preprocessor(images, do_resize=True, size=(self.image_size, self.image_size))
-                    _data_dict['pixel_values'] = np.stack(_data_dict['pixel_values'], axis=0)
-                    _data_dict['pixel_values'] = torch.tensor(_data_dict['pixel_values'], dtype=torch.float)
-                    num_image_tokens = _data_dict['pixel_values'].shape[0] * self.patch_token
+            pixel_values_list = []
+            for img_rgb_like in rgb_like_images:
+                sub_images = dynamic_preprocess(
+                    img_rgb_like,
+                    self.min_dynamic_patch,
+                    self.max_dynamic_patch,
+                    self.image_size,
+                    self.use_thumbnail
+                )
+                pixel_values_list.extend([self.transformer(si) for si in sub_images])
 
-                else:
-                    raise NotImplementedError(f"Unsupported arch_type: {self.arch_type}")
+            pixel_values = torch.stack(pixel_values_list)  # 形状：[M_total, 3, 448, 448]（示例）
+            out_data_dict['pixel_values'] = pixel_values
+            # print("######", pixel_values.shape)
 
-                out_data_dict.update(_data_dict)
 
-            else:
-                # fallback 到 dynamic_preprocess + transformer
-                pixel_values_list = []
-                for image in images:
-                    sub_images = dynamic_preprocess(image, self.min_dynamic_patch,
-                                                    self.max_dynamic_patch,
-                                                    self.image_size, self.use_thumbnail)
-                    pixel_values_list.extend([self.transformer(img) for img in sub_images])
-
-                pixel_values = torch.stack(pixel_values_list)
-                out_data_dict['pixel_values'] = pixel_values
-                num_image_tokens = pixel_values.shape[0] * self.patch_token
+    
+            num_image_tokens = pixel_values.shape[0] * self.patch_token
 
             image_token_str = f'{self.IMG_START_TOKEN}' \
                             f'{self.IMG_CONTEXT_TOKEN * num_image_tokens}' \
@@ -760,7 +914,7 @@ class Multi_LLaVADataset(Dataset):
                 if image_token_str is None and '<image>' in msg['value']:
                     msg['value'] = msg['value'].replace('<image>', '')
                 if '<image>' in msg['value']:
-                    msg['value'] = msg['value'].replace('<image>', image_token_str*2).strip()
+                    msg['value'] = msg['value'].replace('<image>', image_token_str).strip()
                 input += msg['value'].strip()
             elif msg['from'] == 'gpt':
                 out_conversation.append({

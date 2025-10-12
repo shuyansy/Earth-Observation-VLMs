@@ -372,7 +372,6 @@ class InternVL_Slowfast(InternVL_V1_5):
         else:
             vit_embeds = self.model.extract_feature(pixel_values)
             vit_embeds = vit_embeds.to(input_embeds.dtype)  # FIXME: why vit_embeds is float16?
-            # print("msshape",vit_embeds.shape)
             fast_vit_embeds = None
 
         vit_embeds = vit_embeds[image_flags == 1]
@@ -537,24 +536,10 @@ class InternVL_Slowfast(InternVL_V1_5):
         input_embeds = self.model.language_model.get_input_embeddings()(
             input_ids).clone()
 
+        # print("#####",input_embeds.shape)
         
-        QUESTION_START_TOKEN_ID = 151666
-
-        # 找到最后一个151666的位置
-        question_start_positions = (input_ids[0] == QUESTION_START_TOKEN_ID).nonzero(as_tuple=True)[0]
-
-        if len(question_start_positions) > 0:
-            # 从151666之后开始提取
-            question_start = question_start_positions[-1].item() + 1
-            text_embeds_question = input_embeds[:, question_start:, :].clone()  # (1, M_question, D)
-        else:
-            # 备用：如果没找到，用全部
-            text_embeds_question = input_embeds.clone()
-            print("[WARNING] 151666 not found, using full input_embeds")
-
-       
         
-    
+
         if fast_pixel_values is not None:
             n_fast_images = fast_pixel_values.shape[0]
             whole_pixel_values = torch.cat([fast_pixel_values, pixel_values], dim=0)
@@ -579,59 +564,39 @@ class InternVL_Slowfast(InternVL_V1_5):
 
                 # print("wwwww", image_tokens.shape, rgb_image_tokens.shape)
 
-                # 输入特征 - 显式clone
-                X_sar = vit_embeds.clone()  # 完全复制
-                X_rgb = rgb_vit_embeds.clone()  # 完全复制
+                sar_vit_embeds = vit_embeds  # (B, N_sar, D)
+                rgb_vit_embeds = rgb_vit_embeds  # (B, N_rgb, D)
 
-                eps=1e-6
-                tau_txt = 0.2
-                # ========== 1. 特征归一化 ==========
-                X_rgb_norm = X_rgb / (X_rgb.norm(dim=-1, keepdim=True) + eps)
-                X_sar_norm = X_sar / (X_sar.norm(dim=-1, keepdim=True) + eps)
+                X_sar=sar_vit_embeds
+                X_rgb=rgb_vit_embeds
+                tau = 0.2  # 温度，拉开分布
+                D = X_rgb.size(-1)
 
-           
-                def compute_token_quality(X_norm, tau=0.1):
-                    
-                    A = F.softmax(torch.matmul(X_norm, X_norm.transpose(-2, -1)) / tau, dim=-1)
-                    entropy = -(A * torch.log(A + 1e-10)).sum(dim=-1)
-                    # 归一化：熵越低质量越高
-                    quality = 1 - (entropy - entropy.min()) / (entropy.max() - entropy.min() + 1e-6)
-                    return quality
+                # 互注意力
+                A_rs = torch.matmul(X_rgb, X_sar.transpose(-2, -1)) / (sqrt(D) * tau)  # (B,N,N)
+                A_rs = F.softmax(A_rs, dim=-1)  # RGB->SAR
 
-                quality_rgb = compute_token_quality(X_rgb_norm, tau=0.1)  # (B, N)
-                quality_sar = compute_token_quality(X_sar_norm, tau=0.1)  # (B, N)
+                A_sr = torch.matmul(X_sar, X_rgb.transpose(-2, -1)) / (sqrt(D) * tau)  # (B,N,N)
+                A_sr = F.softmax(A_sr, dim=-1)  # SAR->RGB
 
-             
-                # ========== 3. 文本相关性 ==========
-                text_norm = text_embeds_question / (text_embeds_question.norm(dim=-1, keepdim=True) + eps)
-                relevance_rgb = torch.matmul(X_rgb_norm, text_norm.transpose(1, 2)) / tau_txt
-                relevance_sar = torch.matmul(X_sar_norm, text_norm.transpose(1, 2)) / tau_txt
+                # 对角线 = 对应位置的互吸引力
+                r_sar = torch.diagonal(A_rs, dim1=-2, dim2=-1)  # (B, N)  RGB认为对应SAR位置的可靠度
+                r_rgb = torch.diagonal(A_sr, dim1=-2, dim2=-1)  # (B, N)  SAR认为对应RGB位置的可靠度
 
-                beta_rgb = relevance_rgb.max(dim=-1)[0]  # (B, N)
-                beta_sar = relevance_sar.max(dim=-1)[0]  # (B, N)
+                ######################  add visual-text cross attention
+                text_embeds
 
-             
-          
-        
-                alpha_quality = F.softmax(torch.stack([quality_rgb, quality_sar], dim=-1), dim=-1)  # (B, N, 2)
+                # 融合权重（每个位置两路归一化）
+                alpha = torch.stack([r_rgb, r_sar], dim=-1)         # (B,N,2)
+                alpha = F.softmax(alpha, dim=-1)                    # (B,N,2)
+                alpha_rgb = alpha[..., 0].unsqueeze(-1)             # (B,N,1)
+                alpha_sar = alpha[..., 1].unsqueeze(-1)             # (B,N,1)
 
-   
-                alpha_txt = F.softmax(torch.stack([beta_rgb, beta_sar], dim=-1), dim=-1)  # (B, N, 2)
+                # 按位置加权融合
+                Z = alpha_rgb * X_rgb + alpha_sar * X_sar           # (B,N,D)
+                vit_embeds = Z
+                # print("####",vit_embeds.shape)
 
-              
-                alpha = 0.7 * alpha_txt + 0.3 * alpha_quality  # 可调整比例
-
-                alpha_rgb = alpha[..., 0:1]
-                alpha_sar = alpha[..., 1:2]
-
-
-             
-                vit_embeds_fused = alpha_rgb * X_rgb + alpha_sar * X_sar
-
-                # 重新赋值给vit_embeds
-                vit_embeds = vit_embeds_fused
-
-                # print("#### Fused embeddings shape:", vit_embeds.shape)
 
 
             vit_embeds = vit_embeds.to(input_embeds.dtype)  # FIXME: why vit_embeds is float16?

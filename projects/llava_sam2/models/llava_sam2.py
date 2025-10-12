@@ -228,6 +228,9 @@ class VideoLLaVASAMModel(LisaModel):
 
     def state_dict(self, *args, **kwargs):
         state_dict = super(LisaModel, self).state_dict(*args, **kwargs)
+
+
+   
         from collections import OrderedDict
 
         to_return = OrderedDict()
@@ -240,7 +243,7 @@ class VideoLLaVASAMModel(LisaModel):
         elif not self.mllm.freeze_visual_encoder:
             to_return.update({
                 k: v
-                for k, v in state_dict.items() if 'visual_encoder.' in k
+                for k, v in state_dict.items() if 'mllm.model.vision_model.' in k
             })
             raise NotImplementedError
         # Step 2. LLM
@@ -291,6 +294,11 @@ class VideoLLaVASAMModel(LisaModel):
         to_return.update(
             {k: v
              for k, v in state_dict.items() if 'embed_tokens.weight' in k or 'tok_embeddings' in k})
+        
+        
+    
+    
+    
         return to_return
 
     def check_obj_number(self, pred_embeddings_list_video, gt_masks_video, fix_number=5):
@@ -822,8 +830,7 @@ class VideoLLaVASAMModel_zero3(VideoLLaVASAMModel):
         if image_pair is not None:
 
             sar_token,rgb_token=image_pair
-            cosine_loss2 = F.mse_loss(sar_token,rgb_token)
-            cosine_loss=cosine_loss2
+        
 
             if gt_masks is None:
                 # require zero seg datas
@@ -925,8 +932,7 @@ class VideoLLaVASAMModel_zero3(VideoLLaVASAMModel):
             loss_dict = {
                 'loss_mask': loss_mask,
                 'loss_dice': loss_dice,
-                'llm_loss': output.loss,
-                "cos_loss": cosine_loss
+                'llm_loss': output.loss
             }
      
             return loss_dict
@@ -1004,32 +1010,7 @@ class VideoLLaVASAMModel_zero3(VideoLLaVASAMModel):
             attentions = attn.mean(dim=1)       # 平均 head: [bs, L, L]
             hidden_states = output.hidden_states[-1]  # [bs, L, D]
             bs=hidden_states.shape[0]
-            if seg_valid:
-                loss_attn=0
-                for i in range(bs):
-                    hideen_states_i=hidden_states[i]
-                    input_id_i=input_ids[i]
-                    seg_indices = torch.nonzero(input_id_i == self.seg_token_idx)
-                    seg_indices=seg_indices.squeeze(1)
-
-                    img_indices = torch.nonzero(input_id_i == 151667)
-                    img_indices=img_indices.squeeze(1) # # img torch.Size([256])
-
-                    attention_i=attentions[i]
-                    seg2img_attn = attention_i[seg_indices][:, img_indices] 
-                    mask_i = (gt_mask_list[i] > 0).float()  # [5, 256, 256]
-                    H, W = infer_patch_size(seg2img_attn.shape[1])  # E.g., 16x16 for 256 tokens
-                    gt_patch_mask = F.adaptive_max_pool2d(mask_i.unsqueeze(1), output_size=(H, W))  # [5, 1, H, W]
-                    gt_patch_mask = gt_patch_mask.squeeze(1).flatten(1)                              # [5, N]
-                    gt_patch_mask = gt_patch_mask / (gt_patch_mask.sum(dim=1, keepdim=True) + 1e-6)  # Normalize
-                    
-
-                    # Compute KL divergence (attention vs GT patch-level mask)
-                    log_attn = torch.log(seg2img_attn + 1e-6)
-                    loss_attn_i = F.kl_div(log_attn, gt_patch_mask, reduction='batchmean', log_target=False)
-
-                    loss_attn += loss_attn_i
-                loss_attn = loss_attn / bs 
+          
 
 
             bs = len(pred_masks)
@@ -1064,20 +1045,10 @@ class VideoLLaVASAMModel_zero3(VideoLLaVASAMModel):
                 _scale = 1.0
             loss_mask = loss_mask * _scale
             loss_dice = loss_dice * _scale
-            
 
-            if seg_valid:
-                loss_attn = loss_attn * 0.1
-                loss_dict = {
-                    'loss_mask': loss_mask,
-                    'loss_dice': loss_dice,
-                    'llm_loss': output.loss,
-                    "loss_attn": loss_attn
-                }
-            else:
-                loss_dict = {
-                    'loss_mask': loss_mask,
-                    'loss_dice': loss_dice,
-                    'llm_loss': output.loss
-                }
+            loss_dict = {
+                'loss_mask': loss_mask,
+                'loss_dice': loss_dice,
+                'llm_loss': output.loss
+            }
             return loss_dict

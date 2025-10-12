@@ -10,10 +10,10 @@ from subprocess import run
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Multi-GPU Inference for VQA')
-    parser.add_argument('--model_path', default="train_weight_msnew")
+    parser.add_argument('--model_path', default="ms_weight")
     parser.add_argument('--results_dir', default="ms_vqaresult")
-    parser.add_argument('--annotation_file', default="data/multi-spectrum/ms_test.jsonl")
-    parser.add_argument('--image_dir', default="data/multi-spectrum/rgb_images")
+    parser.add_argument('--annotation_file', default="data/ms_test_new.jsonl")
+    parser.add_argument('--image_dir', default="/scqian/BigEarthNet-S2")
     parser.add_argument('--num_gpus', type=int, default=4)
     return parser.parse_args()
 
@@ -51,17 +51,16 @@ def run_inference_on_rank(rank, model_path, image_dir, results_dir):
     for i in tqdm(data, desc=f"GPU {rank}"):
         img_id = i['image']
         anno_id = i['id']
-        image_folder = os.path.join(image_dir, img_id).replace(".png", "")
+        image_folder = os.path.join(image_dir, img_id)
         instruction = "<image>" + i["question"]
 
         if not os.path.exists(image_folder):
             print(f"[Warning] Image folder not found: {image_folder}")
             continue
 
-        image_list = sorted(os.listdir(image_folder))
-        vid_frames = [Image.open(os.path.join(image_folder, im)).convert("RGB") for im in image_list]
 
-        result = model.predict_forward(video=vid_frames, text=instruction, tokenizer=tokenizer)
+
+        result = model.predict_forward(image=image_folder, text=instruction, tokenizer=tokenizer)
         prediction = result['prediction'].replace("<|end|>", "")
 
         submit = {

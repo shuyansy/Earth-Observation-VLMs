@@ -1,6 +1,7 @@
 import argparse
 import os
 import json
+import re
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
@@ -8,7 +9,7 @@ import glob
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-import re
+
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
@@ -23,6 +24,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
+
 
 _BAND_RE = re.compile(r"_B(\d{2}|8A)\b", re.IGNORECASE)
 
@@ -148,97 +150,12 @@ def ms_filelist_to_rgb_and_extra_groups(
     
     return images
 
-def weights_to_map_16x16(w_patch, patch_size=(448, 448)):
-    if not isinstance(w_patch, torch.Tensor):
-        w = torch.tensor(w_patch)
-    else:
-        w = w_patch
-    if w.ndim == 2 and w.size(-1) == 1:
-        w = w.squeeze(-1)                   # (256,)
-    w = w.reshape(16, 16)[None, None, ...]  # (1,1,16,16)
-
-    # 关键：最近邻，不要 bilinear
-    w = w.to(torch.float32)
-    w = F.interpolate(w, size=patch_size, mode='nearest')  # (1,1,H,W)
-    w = w[0, 0]
-
-    # 可选：归一化到 [0,1]（保持对比）
-    mn, mx = w.min(), w.max()
-    w = (w - mn) / (mx - mn + 1e-6)
-    return w
-
-
-# --- 按 rows×cols 拼接回整图 ---
-def stitch_grid(weight_list, rows, cols, patch_size=(448, 448)):
-    H, W = patch_size
-    assert len(weight_list) >= rows * cols
-    idx = 0
-    rows_cat = []
-    for _ in range(rows):
-        row = torch.cat([weight_list[idx + c] for c in range(cols)], dim=1)  # (H, cols*W)
-        rows_cat.append(row)
-        idx += cols
-    full = torch.cat(rows_cat, dim=0)  # (rows*H, cols*W)
-    return full
-
-def make_dense_map_from_blocks(weight_blocks, rows, cols, patch_size=(448,448)):
-    """
-    weight_blocks: (blocks, 256) 或 (blocks, 256, 1) 的 torch.Tensor
-    返回: np.ndarray, (H_full, W_full), 已归一化到 [0,1]
-    """
-    blocks = rows * cols
-    w = weight_blocks[:blocks].to(torch.float32)  # 先截取、转 float32
-    maps = [weights_to_map_16x16(w[i], patch_size) for i in range(blocks)]
-    full_t = stitch_grid(maps, rows, cols, patch_size)  # torch.float32
-    return full_t.cpu().numpy()
-
-def plot_img_and_heatmap(rgb_img_pil, sar_img_pil,
-                         rgb_weight_blocks, sar_weight_blocks,
-                         rows, cols, save_path=None, show=True,
-                         cmap='viridis'):
-    """
-    rgb_img_pil, sar_img_pil: PIL.Image (原图，会被 resize 成 rows*448 × cols*448)
-    rgb_weight_blocks, sar_weight_blocks: Tensor，(blocks, 256) 或 (blocks, 256, 1)
-    rows, cols: 动态切块得到的行列数（result['sta']）
-    """
-
-    patch_size = (448, 448)
-    H_full, W_full = rows * patch_size[0], cols * patch_size[1]
-
-    # 生成密集权重图（每像素都有值）
-    rgb_dense = make_dense_map_from_blocks(rgb_weight_blocks, rows, cols, patch_size)  # (H_full, W_full)
-    sar_dense = make_dense_map_from_blocks(sar_weight_blocks, rows, cols, patch_size)  # (H_full, W_full)
-
-    # 把原图 resize 到相同大小
-    rgb_np = np.array(rgb_img_pil.resize((W_full, H_full)))
-    sar_np = np.array(sar_img_pil.resize((W_full, H_full)))
-
-    # 画两行两列：左原图，右权重
-    plt.figure(figsize=(10, 10))
-
-    plt.subplot(2, 2, 1)
-    plt.imshow(rgb_np); plt.title('RGB image'); plt.axis('off')
-
-    plt.subplot(2, 2, 2)
-    plt.imshow(rgb_dense, vmin=0, vmax=1, cmap='viridis', interpolation='nearest')
-    plt.title('RGB weight (dense)'); plt.axis('off')
-
-    plt.subplot(2, 2, 3)
-    plt.imshow(sar_np); plt.title('SAR image'); plt.axis('off')
-
-    plt.subplot(2, 2, 4)
-    plt.imshow(sar_dense, vmin=0, vmax=1, cmap='viridis', interpolation='nearest')
-    plt.title('SAR weight (dense)'); plt.axis('off')
-
-    if save_path:
-        plt.savefig(save_path, bbox_inches='tight', dpi=200)
-    if show:
-        plt.show()
-    else:
-        plt.close()
-
-
-
+# 使用示例：
+# 之前你的代码中得到了 rgb_image_list
+# rgb_image_list = ['/path/1_B01.tif', '/path/1_B02.tif', ..., '/path/1_B12.tif']
+# 
+# 现在调用修改后的函数：
+# images = ms_filelist_to_rgb_and_extra_groups(rgb_image_list)
 
 try:
     from mmengine.visualization import Visualizer
@@ -249,15 +166,11 @@ except ImportError:
 def parse_args():
     parser = argparse.ArgumentParser(description='Video Reasoning Segmentation')
     parser.add_argument('--model_path', default="/data/Earthmind_proj/final_retrain_multi")
-    parser.add_argument('--results_dir', default="pair_multimcq_rgb_final1", help='The dir to save results.')
+    parser.add_argument('--results_dir', default="pair_multimcq_rgb_ms", help='The dir to save results.')
     parser.add_argument('--select', type=int, default=-1)
-    # parser.add_argument("--annotation_files", nargs='+', default=["/data/Earthmind_proj/data/formal_data_test/ms_scene_classification_qa.json","data/formal_data_test/scene_classification_unmatched.json","data/formal_data_test/object_existence_all_unmatched.json","data/formal_data_test/spatial_relationship_all_unmatched.json","data/formal_data_test/hallucination_detection_all_unmatched.json","data/formal_data_test/object_counting_all_unmatched.json",\
-    # ],
-    #                     help="List of annotation JSON files.")
-    parser.add_argument("--annotation_files", nargs='+', default=["/data/Earthmind_proj/data/formal_data_test/ms_scene_classification_qa.json"],help="List of annotation JSON files.")
-    parser.add_argument("--image_dir", default="/data/Earthmind_proj/data/pair_data/test", type=str,
-                        help="Root folder for SAR/RGB images.")
-    parser.add_argument("--ms_image_dir", default="/data/Earthmind_proj/data/pair_data/test/ms_sar", type=str,
+    parser.add_argument("--annotation_files", nargs='+', default=["/data/Earthmind_proj/data/formal_data_test/ms_scene_classification_qa.json"],\
+                        help="List of annotation JSON files.")
+    parser.add_argument("--image_dir", default="/data/Earthmind_proj/data/pair_data/test/ms_sar", type=str,
                         help="Root folder for SAR/RGB images.")
     return parser.parse_args()
 
@@ -284,47 +197,26 @@ if __name__ == "__main__":
 
         all_submit = []
         false = []
-        print("#######",anno_file)
 
         for i in tqdm(data, desc=f"Processing {os.path.basename(anno_file)}"):
-
-            
             file_name = i["file_name"]
+            image_path = os.path.join(cfg.image_dir, "sar/img", file_name+".png")
             
-            if "ms" not in anno_file:
-                print("2222222222")
-                image_path = os.path.join(cfg.image_dir, "sar/img", file_name.replace(".json", ".png"))
-                rgb_image_path = os.path.join(cfg.image_dir, "rgb/img", file_name.replace(".json", ".png"))
+            options = i.get("candidate", [])
+            option_str = "\n" + "\n".join(options) if options else ""
+            instruction = "<image>" + i["question"] + option_str
 
-                options = i.get("candidate", [])
-                option_str = "\n" + "\n".join(options) if options else ""
-                instruction = "<image>" + i["question"] + option_str + "\nonly output the correct option."
-
-                try:
-                    img = Image.open(image_path).convert('RGB')
-                    rgb_img = Image.open(rgb_image_path).convert('RGB')
-                except Exception as e:
-                    print(f"Error loading image: {image_path} or {rgb_image_path} - {e}")
-                    false.append(file_name)
-                    continue
-            else:
-                print("111111111")
-                image_path = os.path.join(cfg.ms_image_dir, "sar/img", file_name+".png")
             
-                options = i.get("candidate", [])
-                option_str = "\n" + "\n".join(options) if options else ""
-                instruction = "<image>" + i["question"] + option_str
-
-                img = Image.open(image_path).convert('RGB')
-                rgb_dir = os.path.join(cfg.ms_image_dir, "ms/img")
-        
-                # Method 1: Using glob to find all matching TIF files
-                rgb_image_pattern = os.path.join(rgb_dir, f"{file_name}_*.tif")
-                rgb_image_list = glob.glob(rgb_image_pattern)
-                rgb_image_list.sort()  # Sort to ensure consistent order (B01, B02, etc.)
-              
-                rgb_img =ms_filelist_to_rgb_and_extra_groups(rgb_image_list, to_uint8=True, pad_mode="repeat")
-
+            img = Image.open(image_path).convert('RGB')
+            rgb_dir = os.path.join(cfg.image_dir, "ms/img")
+    
+            # Method 1: Using glob to find all matching TIF files
+            rgb_image_pattern = os.path.join(rgb_dir, f"{file_name}_*.tif")
+            rgb_image_list = glob.glob(rgb_image_pattern)
+            rgb_image_list.sort()  # Sort to ensure consistent order (B01, B02, etc.)
+            print("#####",rgb_image_list,len(rgb_image_list))
+            rgb_img =ms_filelist_to_rgb_and_extra_groups(rgb_image_list, to_uint8=True, pad_mode="repeat")
+            print(type(rgb_img),len(rgb_img))
 
 
             result = model.predict_forward_multi(
@@ -338,27 +230,9 @@ if __name__ == "__main__":
             rgb_weight,sar_weight=vis_weight[0],vis_weight[1]   #[5 256 1]; [5 256 1]
             # print("####",rgb_weight.shape,sar_weight.shape)
             cols,rows=result['sta'][0],result['sta'][1]
-            
 
-        #     save_path=f'/scqian/Earthmind_proj/vis_qkv/{file_name.replace(".json", ".png")}'
-        #     # 在 visualize_full_weights_on_image 里，拼接、平滑、逐像素归一化后已经有：
-        #     # rgb_norm, sar_norm ∈ [0,1], base_np 为 H×W×3
-        #     plot_img_and_heatmap(
-        #     rgb_img_pil=rgb_img,
-        #     sar_img_pil=img,                  # 你的 SAR PIL 图
-        #     rgb_weight_blocks=rgb_weight,     # [blocks, 256, 1]
-        #     sar_weight_blocks=sar_weight,     # [blocks, 256, 1]
-        #     rows=rows, cols=cols,
-        #     save_path=save_path,
-        #     show=False,                       # 或 True
-        #     cmap='viridis'                    # 或 'inferno' 等
-        # )
-
-            
        
             prediction = result['prediction'].replace("<|end|>", "")
-            print(instruction)
-            print(prediction)
             submit = {
                 "image_id": file_name,
                 "pred": prediction,

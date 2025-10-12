@@ -78,7 +78,7 @@ def evaluate_token_recall(reference, candidate):
 
 
 if __name__ == "__main__":
-    jsonl_path = "/data/new3/ms_vqaresult/ms_vqa_pre.jsonl"  # 替换为你的路径
+    jsonl_path = "/scqian/Earthmind_proj/ms_vqaresult/ms_vqa_pre.jsonl"  # 替换为你的路径
 
     total = 0
     recall_sum = 0

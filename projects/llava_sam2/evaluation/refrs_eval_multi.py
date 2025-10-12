@@ -17,7 +17,7 @@ from dataset import RESDataset,RESDataset_Multi
 
 def parse_args():
     parser = argparse.ArgumentParser(description='RefCocoSeg')
-    parser.add_argument('--model_path',default="/data/new2/train_finalnew", help='hf model path.')
+    parser.add_argument('--model_path',default="/scqian/Earthmind_proj/multi_weight_final", help='hf model path.')
     parser.add_argument(
         '--dataset',
         choices=DATASETS_ATTRIBUTES.keys(),

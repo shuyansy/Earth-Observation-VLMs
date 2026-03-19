@@ -1,19 +1,18 @@
 
-## TerraScope: Leveraging Cross-Sensor Data for Advanced Earth Observation Interpretation with a Unified Multimodal LLM
+## [CVPR 2026] TerraScope: Pixel-Grounded Visual Reasoning for Earth Observation
 <p align="center">
-    🌐 <a href="" target="_blank">Blog</a> | 📃 <a href="https://arxiv.org/abs/2506.01667" target="_blank">Paper</a> | 🤗 <a href="https://huggingface.co/sy1998/TerraScope" target="_blank">Model</a> |  🤗 <a href="https://huggingface.co/datasets/sy1998/TerraScope-data" target="_blank">Training_Data</a> | 🤗 <a href="https://huggingface.co/datasets/sy1998/TerraScope-Bench" target="_blank">Benchmarks</a>
+    🌐 <a href="" target="_blank">Blog</a> | 📃 <a href="" target="_blank">Paper</a> | 🤗 <a href="https://huggingface.co/sy1998/TerraScope" target="_blank">Model</a> |  🤗 <a href="https://huggingface.co/datasets/sy1998/TerraCoT" target="_blank">Training_Data</a> | 🤗 <a href="https://huggingface.co/datasets/sy1998/TerraScope-Bench" target="_blank">Benchmarks</a> |  🎥 <a href="" target="_blank">Demo</a>
 
 </p>
 
 
 
-#### [Yan Shu <sup>1</sup>](https://shuyansy.github.io/), [Bin Ren <sup>1,4,5</sup>](https://amazingren.github.io/), [Zhitong Xiong <sup>3</sup>](https://zhitong-xiong.github.io/), [Danda Pani Paudel <sup>5</sup>](https://people.ee.ethz.ch/~paudeld/), [Luc Van Gool <sup>5</sup>](https://scholar.google.com/citations?user=TwMib_QAAAAJ&hl=en), [Begüm Demir <sup>2</sup>](https://rsim.berlin/), [Nicu Sebe <sup>1</sup>](https://scholar.google.com/citations?user=stFCYOAAAAAJ&hl=en), and [Paolo Rota <sup>1</sup>](https://paolorota.eu/)
+#### [Yan Shu <sup>1</sup>](https://shuyansy.github.io/), [Bin Ren <sup>1,4</sup>](https://amazingren.github.io/), [Zhitong Xiong <sup>3</sup>](https://zhitong-xiong.github.io/), [Xiao Xiang Zhu <sup>3</sup>](https://scholar.google.com/citations?user=CNakdIgAAAAJ&hl=en), [Begüm Demir <sup>2</sup>](https://rsim.berlin/), [Nicu Sebe <sup>1</sup>](https://scholar.google.com/citations?user=stFCYOAAAAAJ&hl=en), and [Paolo Rota <sup>1</sup>](https://paolorota.eu/)
 
 <sup>1</sup> University of Trento, Italy, <br>
-<sup>2</sup> Technische Universität Berlin, Germany, <br>
+<sup>2</sup> BIFOLD and TU Berlin, Germany, <br>
 <sup>3</sup> Technical University of Munich, Germany, <br>
-<sup>4</sup> University of Pisa, Italy, <br>
-<sup>5</sup> INSAIT, Sofia University "St. Kliment Ohridski", Bulgaria<br>
+<sup>4</sup> MBZUAI <br>
 
 
 <p align="center">
@@ -25,17 +24,13 @@
 
 ✨ **Highlights**:
 
-(i) The first multi-granular and multi-sensor Earth Observation LMMs. TerraScope can handle Optical (RGB and MultiSpectral) and SAR image perception and reasoning.
+(i) The first pixel-grounded reasoning paradigm for geospatial analysis,  enabling interpretable chain-of-thought reasoning with explicit visual grounding through segmentation masks.
 
-(ii) TerraScope achieves strong performance on several downstream EO tasks, including but not limited to Scene classification, VQA, Captioning and segmentation tasks.
+(ii) Terra-CoT, a large-scale training dataset with pixel-grounded reasoning trajectories for geospatial tasks.
 
-(iii) Proposing TerraScope-Bench, the first multi-sensor EO benchmarks, including 10 subtasks, evaluating the perception and reasoning ability of LMMs.
+(iii) TerraScope-Bench, a comprehensive benchmark for evaluating pixel-grounded geospatial reasoning across diverse EO scenarios.
 
 
-
-## News
-- [2025/06/01] 🔥 The technical report of TerraScope is released.
-- [2025/05/29] 🔥 TerraScope is released,  including data, model weight, training and evaluation code.
 
 ## Model Weights
 | Model | Link |
@@ -60,12 +55,6 @@ We provide a demo script [`demo.py`](demo.py) that runs inference on TerraScope-
 ```bash
 # Run demo (both single-image and dual-image examples)
 python demo.py --model-path sy1998/TerraScope --device cuda:0
-
-# Skip disaster examples
-python demo.py --model-path sy1998/TerraScope --skip-disaster
-
-# Skip TerraScope-Bench examples
-python demo.py --model-path sy1998/TerraScope --skip-terrascope
 ```
 
 Demo images are included in [`demo_imgs/`](demo_imgs/). Output visualizations (with segmentation overlays and reasoning) are saved to `demo_output/`.
@@ -75,7 +64,7 @@ Demo images are included in [`demo_imgs/`](demo_imgs/). Output visualizations (w
 
 ### Data Preparation
 
-Download the training data from [🤗 sy1998/TerraScope-data](https://huggingface.co/datasets/sy1998/TerraScope-data) and [🤗 sy1998/Multisensor_RS_Data](https://huggingface.co/datasets/sy1998/Multisensor_RS_Data), and organize them under the `data/` folder.
+Download the training data from [🤗 sy1998/TerraScope-data](https://huggingface.co/datasets/sy1998/TerraScope-data)  and organize them under the `data/` folder.
 
 Download the pretrained backbone weights into `pretrained/`.
 
@@ -84,7 +73,6 @@ Download the pretrained backbone weights into `pretrained/`.
 We recommend using 8 A100 GPUs. The training config is at [`projects/terrascope/configs/terrascope_8b.py`](projects/terrascope/configs/terrascope_8b.py).
 
 ```bash
-# Single-sensor training
 bash tools/dist.sh train projects/terrascope/configs/terrascope_8b.py 8
 ```
 
@@ -105,7 +93,7 @@ python projects/terrascope/hf/convert_to_hf.py \
 
 ### TerraScope-Bench
 
-TerraScope-Bench evaluates pixel-level geospatial reasoning across 5 tasks: Coverage Percentage, Comparative Ranking, Absolute Area, Boundary Detection, and Distance Measurement.
+TerraScope-Bench evaluates pixel-level geospatial reasoning across several tasks:
 
 ```bash
 # Inference (reads from HuggingFace parquet, no local data needed)
@@ -165,12 +153,7 @@ The data of TerraScope-Bench can be downloaded from [🤗 sy1998/TerraScope-Benc
 If you find this repository useful, please consider giving a star :star: and citation
 
 ```
-@article{shu2025terrascope,
-  title={TerraScope: Towards Multi-Granular and Multi-Sensor Earth Observation with Large Multimodal Models},
-  author={Shu, Yan and Ren, Bin and Xiong, Zhitong and Paudel, Danda Pani and Van Gool, Luc and Demir, Begum and Sebe, Nicu and Rota, Paolo},
-  journal={arXiv preprint arXiv:2506.01667},
-  year={2025}
-}
+
 ```
 
 ## Acknowledgement

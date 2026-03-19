@@ -3,10 +3,10 @@
 
 
 ## News
-- [2026/03/19] 🔥 TerraScope is released.
+- [2026/03/19] 🔥 [TerraScope](./TerraScope) is released. 
 - [2026/02/21] 🎉 TerraScope is accepted by CVPR 2026.
 - [2025/06/01] 🔥 The technical report of EarthMind is released.
-- [2025/05/29] 🔥 EarthMind is released,  including data, model weight, training and evaluation code. 
+- [2025/05/29] 🔥 [EarthMind](./EarthMind) is released, including data, model weight, training and evaluation code. 
 
 
 

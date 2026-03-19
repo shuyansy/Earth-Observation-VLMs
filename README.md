@@ -1,5 +1,5 @@
 
-## Video-XL Family: Efficient VLMs for Extremely Long Video Understanding
+## Earth Observation VLMs Family: Towards mutli-sensor, mutli-granularity vision language reasoning models for Earth Observation
 
 
 ## News
@@ -18,25 +18,14 @@
 If you find this repository useful, please consider giving a star :star: and citation
 
 ```
-@article{shu2024video,
-  title={Video-XL: Extra-Long Vision Language Model for Hour-Scale Video Understanding},
-  author={Shu, Yan and Zhang, Peitian and Liu, Zheng and Qin, Minghao and Zhou, Junjie and Huang, Tiejun and Zhao, Bo},
-  journal={arXiv preprint arXiv:2409.14485},
-  year={2024}
-}
-
-@article{liu2025video,
-  title={Video-XL-Pro: Reconstructive Token Compression for Extremely Long Video Understanding},
-  author={Liu, Xiangrui and Shu, Yan and Liu, Zheng and Li, Ao and Tian, Yang and Zhao, Bo},
-  journal={arXiv preprint arXiv:2503.18478},
+@article{shu2025earthmind,
+  title={EarthMind: Leveraging Cross-Sensor Data for Advanced Earth Observation Interpretation with a Unified Multimodal LLM},
+  author={Shu, Yan and Ren, Bin and Xiong, Zhitong and Paudel, Danda Pani and Van Gool, Luc and Demir, Beg{\"u}m and Sebe, Nicu and Rota, Paolo},
+  journal={arXiv preprint arXiv:2506.01667},
   year={2025}
 }
 ```
 
-## Acknowledgement
-- LongVA: the codebase we built upon. 
-- LMMs-Eval: the codebase we used for evaluation.
-- Activation Beacon: The compression methods we referring.
 
 ## License
 This project utilizes certain datasets and checkpoints that are subject to their respective original licenses. Users must comply with all terms and conditions of these original licenses.

@@ -127,10 +127,6 @@ python projects/terrascope/evaluation/infer_landsat.py \
     --model-path sy1998/TerraScope \
     --input-csv data/landsatvqa/ground_truth_files/Landsat30-AU-VQA-test.csv \
     --image-root data/landsatvqa/VQA
-
-# Evaluate results
-python projects/terrascope/evaluation/eval_landsat.py \
-    --pred-csv eval_results/landsatvqa_results_final.csv
 ```
 
 

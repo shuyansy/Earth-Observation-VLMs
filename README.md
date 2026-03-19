@@ -3,14 +3,10 @@
 
 
 ## News
-- [2025/06/03] 🔥 [Video-XL2](Video-XL-2) is released, which achieves state-of-the-art results on several long video understanding benchmarks.
-- [2025/04/19] 🎉 Most of the Video-XL-Pro [training data](https://huggingface.co/datasets/lxr2003/Video-XL-Pro-Training/tree/main) is released.
-- [2025/04/07] 🎉 Video-XL has been selected as Oral presentation for CVPR.  
-- [2025/03/16] 🎉 [Video-XL-Pro](Video-XL-Pro) is released, which can process 10000 frames on an 80G GPU and achieves promising results with only 3B parameters.
-- [2025/02/27] 🎉 Video-XL has been accepted by CVPR 2025!
-- [2024/12/22] 🔥 Most of the [training data](https://huggingface.co/datasets/sy1998/Video_XL_Training/tree/main) is released. 
-- [2024/10/17] 🔥 Video-XL-7B weight is released, which can process max 1024 frames. 
-- [2024/10/15] 🔥 [Video-XL](Video-XL) is released,  including model, training and evaluation code.
+- [2026/03/19] 🔥 TerraScope is released.
+- [2026/02/21] 🔥 TerraScope is accepted by CVPR 2026.
+- [2025/06/01] 🔥 The technical report of EarthMind is released.
+- [2025/05/29] 🔥 EarthMind is released,  including data, model weight, training and evaluation code. 
 
 
 

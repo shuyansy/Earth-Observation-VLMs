@@ -16,7 +16,7 @@
 
 
 <p align="center">
-    <img src="./assets/new.png" width="900">
+    <img src="./assets/teaser.png" width="1000">
 </p>
 
 
@@ -137,7 +137,7 @@ python projects/terrascope/evaluation/eval_landsat.py \
 ## TerraScope-Bench
 
 <p align="center">
-    <img src="./assets/terrascopebench.png" width="700">
+    <img src="./assets/terrascope_bench.png" width="1000">
 </p>
 
 ✨ **Highlights**:

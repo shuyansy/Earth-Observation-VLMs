@@ -21,14 +21,11 @@ If you find this repository useful, please consider giving a star :star: and cit
   year={2025}
 }
 
-@misc{shu2026terrascopepixelgroundedvisualreasoning,
-      title={TerraScope: Pixel-Grounded Visual Reasoning for Earth Observation}, 
-      author={Yan Shu and Bin Ren and Zhitong Xiong and Xiao Xiang Zhu and Begüm Demir and Nicu Sebe and Paolo Rota},
-      year={2026},
-      eprint={2603.19039},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2603.19039}, 
+@article{shu2026terrascope,
+  title={TerraScope: Pixel-Grounded Visual Reasoning for Earth Observation},
+  author={Shu, Yan and Ren, Bin and Xiong, Zhitong and Zhu, Xiao Xiang and Demir, Beg{\"u}m and Sebe, Nicu and Rota, Paolo},
+  journal={arXiv preprint arXiv:2603.19039},
+  year={2026}
 }
 ```
 

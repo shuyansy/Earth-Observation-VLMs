@@ -149,7 +149,13 @@ The data of TerraScope-Bench can be downloaded from [🤗 sy1998/TerraScope-Benc
 If you find this repository useful, please consider giving a star :star: and citation
 
 ```
-
+@inproceedings{shu2026terrascope,
+  title={TerraScope: Pixel-Grounded Visual Reasoning for Earth Observation},
+  author={Shu, Yan and Ren, Bin and Xiong, Zhitong and Zhu, Xiao Xiang and Demir, Beg{\"u}m and Sebe, Nicu and Rota, Paolo},
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+  pages={16712--16722},
+  year={2026}
+}
 ```
 
 ## Acknowledgement

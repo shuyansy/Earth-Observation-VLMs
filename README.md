@@ -3,6 +3,7 @@
 
 
 ## News
+- [2026/11/23] 🎉 EarthMind is accepted by IEEE Geoscience and Remote Sensing Magazine (GRSM).
 - [2026/03/19] 🔥 [TerraScope](./TerraScope) is released. 
 - [2026/02/21] 🎉 TerraScope is accepted by CVPR 2026.
 - [2025/06/01] 🔥 The technical report of EarthMind is released.

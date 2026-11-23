@@ -3,6 +3,7 @@
 
 
 ## News
+- [2026/11/23] 🔥 The GRSM version of [EarthMind](./EarthMind) with GeoSync Attention (GeSA) is released, including code and [model weights](https://huggingface.co/sy1998/EarthMind-4B-GeSA).
 - [2026/11/23] 🎉 EarthMind is accepted by IEEE Geoscience and Remote Sensing Magazine (GRSM).
 - [2026/03/19] 🔥 [TerraScope](./TerraScope) is released. 
 - [2026/02/21] 🎉 TerraScope is accepted by CVPR 2026.

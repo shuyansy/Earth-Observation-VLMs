@@ -99,6 +99,15 @@ def main():
 
     config_dict["llm_config"]["vocab_size"] = len(model.tokenizer)
     config_dict["template"] = cfg.template
+    # GRSM cross-sensor fusion settings used by predict_forward_gesa
+    mllm_cfg = cfg.model.mllm
+    fusion_mode = mllm_cfg.get('fusion_mode', 'legacy')
+    config_dict['gesa_fusion_mode'] = fusion_mode
+    config_dict['gesa_attn_mode'] = mllm_cfg.get('attn_mode', 'causal')
+    config_dict['gesa_pos_mode'] = mllm_cfg.get('pos_mode', 'seq')
+    config_dict['gesa_external_fusion_layers'] = (
+        mllm_cfg.get('external_fusion_layers', 0) if fusion_mode == 'external' else 0)
+    config_dict['gesa_sar_pad_mode'] = cfg.get('sar_pad_mode', 'zero')
 
     sa2va_hf_config = Sa2VAChatConfig(**config_dict)
     hf_sa2va_model = Sa2VAChatModel(

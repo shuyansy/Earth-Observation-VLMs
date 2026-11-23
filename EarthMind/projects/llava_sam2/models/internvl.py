@@ -14,10 +14,18 @@ from transformers import (AutoConfig, AutoModel, AutoTokenizer,
 from xtuner.model.utils import (find_all_linear_names, get_peft_model_state_dict,
                     guess_load_checkpoint, make_inputs_require_grad)
 import os
+import copy
 import torch.nn.functional as F
 import types
 import sys
 from math import sqrt
+
+from projects.llava_sam2.hf.models.gesa_utils import (
+    MOD_OPT, ATTN_MODES, POS_MODES, layout_modalities, average_colocated_tokens,
+    prepare_gesa_inputs, ExternalFusion)
+
+FUSION_MODES = ('legacy', 'concat', 'avg', 'external')
+
 
 def cross_attn(Q, K, V, tau=1.0):
     # Q:(B, M, D)  K,V:(B, N, D) -> out:(B, M, D)
@@ -98,6 +106,12 @@ class InternVL_Slowfast(InternVL_V1_5):
                  pretrained_pth=None,
                  special_tokens=None,
                  model_split=False,
+                 # ---- cross-sensor fusion (GRSM paper) ----
+                 fusion_mode='legacy',      # legacy | concat | avg | external
+                 attn_mode='causal',        # causal | intra | full   (Eq. 3 = full)
+                 pos_mode='seq',            # seq | shared            (Eq. 4 = shared)
+                 llm_attn_implementation=None,
+                 external_fusion_layers=5,
                  ):
         print_log('Start to load InternVL_V1_5 model.', logger='current')
         super(InternVL_V1_5, self).__init__()
@@ -107,9 +121,26 @@ class InternVL_Slowfast(InternVL_V1_5):
         self.use_visual_encoder_lora = visual_encoder_lora is not None
         self.quantization_vit = quantization_vit
         self.quantization_llm = quantization_llm
-    
-        self.hca_queries = nn.Parameter(torch.randn(256, 2048))  # M=256, D=hidden
-        self.hca_tau = 1.0  
+
+        assert fusion_mode in FUSION_MODES, fusion_mode
+        assert attn_mode in ATTN_MODES, attn_mode
+        assert pos_mode in POS_MODES, pos_mode
+        self.fusion_mode = fusion_mode
+        self.attn_mode = attn_mode
+        self.pos_mode = pos_mode
+        if llm_attn_implementation is None:
+            # custom 4D masks need SDPA/eager; the legacy path keeps flash-attention-2
+            llm_attn_implementation = 'flash_attention_2' if fusion_mode == 'legacy' else 'sdpa'
+        if attn_mode != 'causal' or pos_mode == 'shared':
+            # FA2 cannot take a custom 4D mask and would treat non-monotonic position ids as
+            # packed sequences, so GeSA variants run on SDPA (or eager for attention analysis)
+            assert llm_attn_implementation in ('sdpa', 'eager'), \
+                'GeSA (bidirectional mask / shared position ids) requires sdpa or eager attention'
+        self.llm_attn_implementation = llm_attn_implementation
+
+        if fusion_mode == 'legacy':
+            self.hca_queries = nn.Parameter(torch.randn(256, 2048))  # M=256, D=hidden (unused)
+        self.hca_tau = 1.0
 
         # self.query_token = nn.Parameter(torch.randn(1, 2048))  # D = 2048
         # self.attn_scale = 2048 ** -0.5  # dot product attention scale
@@ -122,9 +153,9 @@ class InternVL_Slowfast(InternVL_V1_5):
 
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         if config.llm_config.model_type == 'internlm2':
-            config.llm_config.attn_implementation = 'flash_attention_2'
+            config.llm_config.attn_implementation = llm_attn_implementation
         else:
-            config.llm_config._attn_implementation = 'flash_attention_2'
+            config.llm_config._attn_implementation = llm_attn_implementation
 
         if quantization_vit is False and quantization_llm is False:
             quantization = None
@@ -168,6 +199,10 @@ class InternVL_Slowfast(InternVL_V1_5):
                 config=config,
                 trust_remote_code=True)
 
+        # InternVL's remote __init__ forces flash_attention_2 on the LLM whenever flash-attn is
+        # installed; swap the attention modules (identical parameters) to the requested kernel.
+        self._set_llm_attn_implementation(llm_attn_implementation)
+
         tokenizer = AutoTokenizer.from_pretrained(
             model_path, trust_remote_code=True)
         self.tokenizer = tokenizer
@@ -185,6 +220,15 @@ class InternVL_Slowfast(InternVL_V1_5):
             self.model.vision_model.requires_grad_(False)
         else:
             self.model.vision_model.requires_grad_(True)
+
+        # External-fusion baseline: built from the (pre-LoRA) LLM layers, fully trainable
+        if self.fusion_mode == 'external':
+            self.external_fusion = ExternalFusion(
+                self.model.language_model.config, external_fusion_layers,
+                init_layers=self.model.language_model.model.layers)
+            self.external_fusion.requires_grad_(True)
+        else:
+            self.external_fusion = None
 
         if hasattr(self.model.language_model, 'enable_input_require_grads'):
             self.model.language_model.enable_input_require_grads()
@@ -217,6 +261,17 @@ class InternVL_Slowfast(InternVL_V1_5):
         self.model.extract_feature = types.MethodType(extract_feature_with_projector_toggle, self.model)
 
 
+    def _set_llm_attn_implementation(self, impl):
+        lm = self.model.language_model
+        if getattr(lm.config, 'model_type', None) != 'qwen2':
+            return
+        from transformers.models.qwen2.modeling_qwen2 import QWEN2_ATTENTION_CLASSES
+        for layer in lm.model.layers:
+            layer.self_attn.__class__ = QWEN2_ATTENTION_CLASSES[impl]
+        lm.config._attn_implementation = impl
+        lm.model.config._attn_implementation = impl   # Qwen2Model builds the mask from its config
+        print_log(f'LLM attention implementation: {impl}', logger='current')
+
     def _add_special_tokens(self, special_tokens):
         num_new_tokens = self.tokenizer.add_tokens(
             special_tokens, special_tokens=True)
@@ -229,7 +284,118 @@ class InternVL_Slowfast(InternVL_V1_5):
             self.fast_pool = nn.AdaptiveAvgPool2d((fast_pool_size, fast_pool_size))
         return
 
+    # ------------------------------------------------------------------------------
+    # Cross-sensor fusion path of the GRSM paper (concat / avg / external + GeSA)
+    # ------------------------------------------------------------------------------
+    def _fuse_visual_block(self, emb, layout):
+        """emb: (n_tiles, tokens_per_tile, C) visual tokens of ONE sample in token order.
+        Returns the token sequence that is written into the LLM input and its layout."""
+        C = emb.shape[-1]
+        multi_sensor = bool(layout) and len(layout_modalities(layout)) > 1
+        if self.fusion_mode == 'avg' and multi_sensor:
+            fused = average_colocated_tokens(emb, layout, emb.shape[1])
+            return fused, [[MOD_OPT, fused.shape[0], 1]]
+        tokens = emb.reshape(-1, C)
+        if self.fusion_mode == 'external' and multi_sensor:
+            tokens = self.external_fusion(tokens.unsqueeze(0)).squeeze(0)
+        return tokens, layout
+
+    def build_visual_sequence(self, vit_embeds, image_flags, n_tiles, layouts,
+                              vp_overall_mask=None, prompt_masks=None):
+        """Per-sample visual tokens (image block, then optional Osprey region tokens),
+        concatenated in the order of the <IMG_CONTEXT> tokens of the batch."""
+        C = vit_embeds.shape[-1]
+        use_vp = vp_overall_mask is not None and prompt_masks is not None
+        if use_vp:
+            vp_overall_mask = vp_overall_mask.to(vit_embeds.device).bool()
+            prompt_masks = [item.to(vit_embeds.device).bool() for item in prompt_masks]
+        seq, llm_layouts = [], []
+        cur, vp_cur = 0, 0
+        for b, nb in enumerate(n_tiles):
+            emb_b = vit_embeds[cur:cur + nb]
+            keep = image_flags[cur:cur + nb] == 1
+            vpm_b = vp_overall_mask[cur:cur + nb] if use_vp else None
+            cur += nb
+            emb_b = emb_b[keep]
+            if emb_b.shape[0] == 0:
+                llm_layouts.append(None)
+                continue
+            layout = layouts[b] if layouts is not None else None
+            block, llm_layout = self._fuse_visual_block(emb_b, layout)
+            seq.append(block)
+            llm_layouts.append(llm_layout)
+            if use_vp:
+                for t in torch.nonzero(vpm_b[keep], as_tuple=False).flatten().tolist():
+                    tile = emb_b[t].reshape(-1, C)
+                    obj_masks = prompt_masks[vp_cur]
+                    n_obj = len(obj_masks)
+                    seq.append(tile.unsqueeze(0).repeat(n_obj, 1, 1)[obj_masks.reshape(n_obj, -1)])
+                    vp_cur += 1
+        vis_seq = torch.cat(seq, 0) if seq else vit_embeds.new_zeros((0, C))
+        return vis_seq, llm_layouts
+
+    def _gesa_forward(self, data):
+        pixel_values = data['pixel_values']
+        if isinstance(pixel_values, torch.Tensor) and pixel_values.ndim == 5:
+            pv_list = list(pixel_values)
+        elif isinstance(pixel_values, (list, tuple)):
+            pv_list = [x.unsqueeze(0) if x.ndim == 3 else x for x in pixel_values]
+        else:
+            raise NotImplementedError(type(pixel_values))
+        n_tiles = [int(x.shape[0]) for x in pv_list]
+        concat_images = torch.cat([x.to(self.model.vision_model.dtype) for x in pv_list], dim=0)
+        input_ids = data['input_ids']
+        attention_mask = data['attention_mask']
+        labels = data['labels']
+        layouts = data.get('vis_layouts', None)
+
+        input_embeds = self.model.language_model.get_input_embeddings()(input_ids).clone()
+        image_flags = (torch.sum(concat_images, dim=(1, 2, 3)) != 0).long()
+        vit_embeds = self.model.extract_feature(concat_images).to(input_embeds.dtype)
+        vis_seq, llm_layouts = self.build_visual_sequence(
+            vit_embeds, image_flags, n_tiles, layouts,
+            data.get('vp_overall_mask', None), data.get('prompt_masks', None))
+
+        B, L, C = input_embeds.shape
+        flat = input_embeds.reshape(B * L, C)
+        selected = input_ids.reshape(B * L) == self.model.img_context_token_id
+        n_sel = int(selected.sum())
+        if n_sel != vis_seq.shape[0]:
+            print(f'warning: {n_sel} <IMG_CONTEXT> tokens but {vis_seq.shape[0]} visual embeddings')
+            if vis_seq.shape[0] == 0:
+                vis_seq = vit_embeds.reshape(-1, C)[:1].repeat(n_sel, 1) * 0
+            elif n_sel > vis_seq.shape[0]:
+                vis_seq = torch.cat([vis_seq] * (n_sel // vis_seq.shape[0] + 1), 0)
+            vis_seq = vis_seq[:n_sel]
+        flat[selected] = vis_seq
+        input_embeds = flat.reshape(B, L, C)
+        self._count += 1
+
+        position_ids, mask4d, _, _ = prepare_gesa_inputs(
+            input_ids, self.model.img_context_token_id, llm_layouts, attention_mask,
+            self.attn_mode, self.pos_mode, dtype=input_embeds.dtype)
+        attn_arg = attention_mask if self.llm_attn_implementation == 'flash_attention_2' else mask4d
+
+        outputs = self.model.language_model(
+            inputs_embeds=input_embeds,
+            attention_mask=attn_arg,
+            position_ids=position_ids,
+            use_cache=False,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        logits = outputs.logits
+        loss = None
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous().view(-1, self.model.language_model.config.vocab_size)
+            shift_labels = labels[..., 1:].contiguous().view(-1).to(shift_logits.device)
+            loss = CrossEntropyLoss()(shift_logits, shift_labels)
+        return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=outputs.past_key_values,
+                                      hidden_states=outputs.hidden_states, attentions=outputs.attentions)
+
     def forward(self, data, data_samples=None, mode='loss', fast_token_idx=None):
+        if self.fusion_mode != 'legacy':
+            return self._gesa_forward(data), None, None, None
         if 'fast_pixel_values' in data.keys():
             assert fast_token_idx is not None
             fast_pixel_values = data['fast_pixel_values']

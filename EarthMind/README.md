@@ -35,6 +35,8 @@
 
 ## Model weights
 Please download our pre-trained weights from the [link](https://huggingface.co/sy1998/EarthMind-Pretrain) and finetuned model weights from the [link](https://huggingface.co/sy1998/EarthMind-4B) (For single sensor scenarios) and [link](https://huggingface.co/sy1998/EarthMind4B_multi) (for multi sensor scenarios).
+
+The IEEE GRSM version with GeoSync Attention (GeSA) is released as [EarthMind-4B-GeSA](https://huggingface.co/sy1998/EarthMind-4B-GeSA); see [GeoSync Attention (GeSA)](#geosync-attention-gesa) for inference, training and evaluation.
   
 ## Installation 
 ```bash
@@ -44,6 +46,91 @@ conda install pytorch==2.3.1 torchvision==0.18.1 pytorch-cuda=12.1 cuda -c pytor
 pip install mmcv==2.1.0 -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.3/index.html
 pip install -r requirements.txt
 ```
+
+## GeoSync Attention (GeSA)
+
+The IEEE GRSM version of EarthMind fuses co-registered sensors with **GeoSync Attention (GeSA)**. Optical tokens (an RGB image, or Sentinel-2 bands grouped into pseudo-RGB frames), SAR tokens (the SAR image zero-padded to pseudo-RGB) and the instruction form one sequence. All visual tokens attend to each other bidirectionally while text stays causal (Eq. 3), and co-located optical and SAR tokens share their RoPE position ids (Eq. 4). GeSA adds no parameters.
+
+Code: `projects/llava_sam2/hf/models/gesa_utils.py` (attention mask, position ids, sensor pre-processing), `projects/llava_sam2/models/internvl.py` (training) and `predict_forward_gesa` in `projects/llava_sam2/hf/models/modeling_earthmind_chat.py` (inference). Checkpoints whose config has no GeSA settings (EarthMind-4B, EarthMind4B_multi) keep the original code path.
+
+**Weights:** [sy1998/EarthMind-4B-GeSA](https://huggingface.co/sy1998/EarthMind-4B-GeSA)
+
+### Inference
+
+```python
+import torch
+from PIL import Image
+from transformers import AutoModel, AutoTokenizer
+
+path = 'sy1998/EarthMind-4B-GeSA'
+model = AutoModel.from_pretrained(path, torch_dtype=torch.bfloat16, trust_remote_code=True).eval().cuda()
+tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+
+rgb = Image.open('data/pair_data/test/rgb/img/dfc2023_test_P_0456.png')
+sar = Image.open('data/pair_data/test/sar/img/dfc2023_test_P_0456.png')
+
+# optical + SAR; pass only optical= or only sar= for single-sensor input
+out = model.predict_forward_gesa(optical=rgb, sar=sar, text='<image>Please describe the image.', tokenizer=tokenizer)
+print(out['prediction'])
+
+# referring segmentation: one mask per [SEG] token (SAM2 receives the SAR image when SAR is given)
+out = model.predict_forward_gesa(optical=rgb, sar=sar, text='<image>Please segment the building in this image.',
+                                 tokenizer=tokenizer)
+masks = out['prediction_masks']  # list of (1, H, W) boolean arrays
+```
+
+`model.predict_forward(image=...)` uses the same GeSA path for single images. For multispectral input, pass the pseudo-RGB frames of `ms_folder_to_pseudo_frames(<folder with the Sentinel-2 band .tif files>)` from `projects.llava_sam2.hf.models.gesa_utils` as `optical=`.
+
+### Training
+
+Download [EarthMind-Pretrain](https://huggingface.co/sy1998/EarthMind-Pretrain) into `pretrained/` (`InternVL2_5-4B/`, `iter_112588.pth`, `sam2_hiera_large.pt`) and the [training data](#training-data) into `data/`, then run stage 2 with GeSA. The config follows Table IV of the paper (global batch 64, lr 4e-5, warm-up ratio 0.3, weight decay 0, one epoch; LoRA, projector and mask decoder are trained). It is set up for 4 GPUs (per-GPU batch 2 x `accumulative_counts` 8); with 8 GPUs set `accumulative_counts = 4`. The released checkpoint was trained on 4 H200 GPUs in about 22 hours.
+
+```bash
+bash tools/dist.sh train projects/llava_sam2/configs/gesa/earthmind_4b_stage2_gesa.py 4
+
+export PYTHONPATH="./:$PYTHONPATH"
+python projects/llava_sam2/hf/convert_to_hf.py projects/llava_sam2/configs/gesa/earthmind_4b_stage2_gesa.py \
+    --pth-model $(cat work_dirs/earthmind_4b_stage2_gesa/last_checkpoint) --save-path your_model_path
+```
+
+The LLM runs with SDPA attention because FlashAttention-2 cannot take the GeSA mask. The conversion stores the GeSA settings in the HF config.
+
+### Evaluation
+
+Run the commands from the `EarthMind/` folder. The scripts in `projects/llava_sam2/evaluation/gesa/` process one shard per GPU (`--shard i --num_shards n`) and combine the shards with `--merge`; the examples below run a single shard.
+
+```bash
+export PYTHONPATH="./:$PYTHONPATH"
+M=sy1998/EarthMind-4B-GeSA            # or a local HF folder
+G=projects/llava_sam2/evaluation/gesa
+
+# EOFuse-Bench (download EarthMind-Bench into data/EOFuse-Bench): multiple-choice tasks, referring
+# segmentation and open-ended generation; --setting optical | sar | fused
+python $G/eval_eofuse.py --model_path $M --setting fused --tasks mcq,seg,oe --out_dir results/eofuse
+python $G/eval_eofuse.py --model_path $M --setting fused --tasks mcq,seg,oe --out_dir results/eofuse --merge
+
+# VRSBench-VQA and UC-Merced
+python $G/table2_image_eval.py --model_path $M --task vrsbench_vqa --out_dir results/table2
+python $G/table2_image_eval.py --model_path $M --task vrsbench_vqa --out_dir results/table2 --merge
+python $G/table2_image_eval.py --model_path $M --task ucm --out_dir results/table2
+python $G/table2_image_eval.py --model_path $M --task ucm --out_dir results/table2 --merge
+
+# GPT judge (gpt-4o, any OpenAI-compatible endpoint) for the EOFuse-Bench open-ended tasks (O-Avg)
+# and VRSBench-VQA
+python $G/gpt_judge/make_inputs.py --results results --out results/gpt_judge --run gesa:eofuse:table2:fused
+export JUDGE_API_KEY=<your key>       # or OPENAI_API_KEY; --base_url for other endpoints
+python results/gpt_judge/judge.py run --model gpt-4o    # -> results/gpt_judge/outputs/summary.json
+
+# RRSIS-D and RefSegRS (released script)
+torchrun --nproc_per_node=1 projects/llava_sam2/evaluation/refrs_eval.py --model_path $M --dataset rrsisd --split test --launcher pytorch
+torchrun --nproc_per_node=1 projects/llava_sam2/evaluation/refrs_eval.py --model_path $M --dataset refsegrs --split test --launcher pytorch
+
+# BigEarthNet-S2: 12 bands -> 4 pseudo-RGB frames (RGB | B01 B05 B06 | B07 B08 B8A | B09 B11 B12)
+python $G/ms_bigearthnet_eval.py --model_path $M --grouping paper --out_dir results/bigearthnet
+python $G/ms_bigearthnet_eval.py --out_dir results/bigearthnet --merge
+```
+
+`projects/llava_sam2/tests/test_gesa.py` contains unit tests for the attention mask and position ids (`python -m pytest -q projects/llava_sam2/tests/test_gesa.py`).
 
 ## Quick Start With HuggingFace
 

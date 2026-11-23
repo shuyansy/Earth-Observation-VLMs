@@ -30,6 +30,8 @@ def video_lisa_collate_fn(instances: Sequence[Dict],
 
     has_vp = any(inst.get('vp_overall_mask') is not None for inst in instances)
     has_prompt_mask = any(inst.get('prompt_masks') is not None for inst in instances)
+    # GeSA: per-sample visual layout [[modality, tokens_per_frame, n_frames], ...]
+    has_vis_layout = any('vis_layout' in inst for inst in instances)
 
     if use_varlen_attn:
         position_ids, cumulative_len = [], []
@@ -195,6 +197,10 @@ def video_lisa_collate_fn(instances: Sequence[Dict],
 
     if has_prompt_mask:
         data_dict['prompt_masks'] = prompt_masks
+
+    if has_vis_layout:
+        # samples coming from datasets without a layout get None (-> one optical frame)
+        data_dict['vis_layouts'] = [inst.get('vis_layout', None) for inst in instances]
 
     if has_grounding_image:
         data_dict['g_pixel_values'] = grounding_pixel_values

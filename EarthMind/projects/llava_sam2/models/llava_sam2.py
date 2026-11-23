@@ -280,10 +280,13 @@ class VideoLLaVASAMModel(LisaModel):
             {k: v
              for k, v in state_dict.items() if 'mask_decoder' in k})
 
-        # Step 5. others (fcs)
+        # Step 5. others (fcs, external-fusion baseline blocks)
         to_return.update(
             {k: v
              for k, v in state_dict.items() if 'text_hidden_fcs.' in k})
+        to_return.update(
+            {k: v
+             for k, v in state_dict.items() if 'mllm.external_fusion.' in k})
         to_return.update(
             {k: v
              for k, v in state_dict.items() if 'text_exist_fcs.' in k}
@@ -807,12 +810,15 @@ class VideoLLaVASAMModel_zero3(VideoLLaVASAMModel):
         )
         self.bs = bs
 
-    def _get_pesudo_data(self, dtype, device):
+    def _get_pesudo_data(self, dtype, device, bs=None):
+        # pseudo SAM2 inputs for batches without segmentation samples; `bs` must equal the
+        # actual batch size (the last batch of an epoch can be smaller than the configured one)
+        bs = self.bs if bs is None else bs
         g_pixel_values = torch.zeros((3, 1024, 1024), dtype=dtype, device=device)
-        g_pixel_values = [g_pixel_values] * self.bs
-        frames_per_batch = [1] * self.bs
+        g_pixel_values = [g_pixel_values] * bs
+        frames_per_batch = [1] * bs
         gt_masks = torch.zeros((5, 256, 256), dtype=torch.uint8, device=device)
-        gt_masks = [gt_masks] * self.bs
+        gt_masks = [gt_masks] * bs
         return g_pixel_values, frames_per_batch, gt_masks
 
     def forward(self, data, data_samples=None, mode='loss'):
@@ -838,6 +844,7 @@ class VideoLLaVASAMModel_zero3(VideoLLaVASAMModel):
                 g_pixel_values, frames_per_batch, gt_masks = self._get_pesudo_data(
                     dtype=self.torch_dtype,
                     device=input_ids.device,
+                    bs=input_ids.shape[0],
                 )
             else:
                 seg_valid = True
@@ -944,6 +951,7 @@ class VideoLLaVASAMModel_zero3(VideoLLaVASAMModel):
                 g_pixel_values, frames_per_batch, gt_masks = self._get_pesudo_data(
                     dtype=self.torch_dtype,
                     device=input_ids.device,
+                    bs=input_ids.shape[0],
                 )
             else:
                 seg_valid = True
@@ -1004,13 +1012,6 @@ class VideoLLaVASAMModel_zero3(VideoLLaVASAMModel):
             gt_masks = [F.interpolate(gt_mask.unsqueeze(0), size=pred_masks[0].shape[-2:], mode='nearest').squeeze(0) for gt_mask in gt_masks_video]
             gt_masks = torch.cat(gt_masks, dim=0)
             pred_masks = pred_masks.flatten(0, 1)
-
-            gt_mask_list=torch.split(gt_masks,5,dim=0)
-            attn = output.attentions[-1]  # [bs, num_heads, L, L]
-            attentions = attn.mean(dim=1)       # 平均 head: [bs, L, L]
-            hidden_states = output.hidden_states[-1]  # [bs, L, D]
-            bs=hidden_states.shape[0]
-          
 
 
             bs = len(pred_masks)

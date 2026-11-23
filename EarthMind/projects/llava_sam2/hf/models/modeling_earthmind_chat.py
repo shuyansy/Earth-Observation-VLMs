@@ -31,6 +31,10 @@ from .modeling_intern_vit import InternVisionModel, has_flash_attn
 
 from .sam2 import SAM2
 from .templates import PROMPT_TEMPLATE
+from .gesa_utils import (MOD_OPT, MOD_SAR, ExternalFusion, ModalityAttentionRecorder,
+                         average_colocated_tokens, gesa_greedy_generate, layout_modalities,
+                         prepare_gesa_inputs, sar_to_pseudo_rgb, tile_coregistered,
+                         tiles_layout_to_token_layout)
 
 import numpy as np
 from torchvision.transforms.functional import resize, to_pil_image
@@ -121,6 +125,14 @@ class Sa2VAChatModel(PreTrainedModel):
         use_flash_attn = use_flash_attn if has_flash_attn else False
         config.vision_config.use_flash_attn = True if use_flash_attn else False
         config.llm_config._attn_implementation = 'flash_attention_2' if use_flash_attn else 'eager'
+        # GRSM cross-sensor fusion settings (absent in released checkpoints -> legacy path)
+        self.gesa_fusion_mode = getattr(config, 'gesa_fusion_mode', 'legacy')
+        self.gesa_attn_mode = getattr(config, 'gesa_attn_mode', 'causal')
+        self.gesa_pos_mode = getattr(config, 'gesa_pos_mode', 'seq')
+        self.gesa_sar_pad_mode = getattr(config, 'gesa_sar_pad_mode', 'zero')
+        if self.gesa_fusion_mode != 'legacy' or getattr(config, 'gesa_force_sdpa', False):
+            # custom 4D masks / non-monotonic position ids need SDPA (eager for attention maps)
+            config.llm_config._attn_implementation = 'sdpa'
 
         logger.info(f'num_image_token: {self.num_image_token}')
         logger.info(f'ps_version: {self.ps_version}')
@@ -172,6 +184,12 @@ class Sa2VAChatModel(PreTrainedModel):
             nn.Linear(in_dim, in_dim), nn.ReLU(inplace=True),
             nn.Linear(in_dim, out_dim), nn.Dropout(0.0)
         )
+
+        n_ext = int(getattr(config, 'gesa_external_fusion_layers', 0) or 0)
+        if self.gesa_fusion_mode == 'external' and n_ext > 0:
+            self.external_fusion = ExternalFusion(config.llm_config, n_ext)
+        else:
+            self.external_fusion = None
 
         self.init_prediction_config = False
 
@@ -797,6 +815,15 @@ class Sa2VAChatModel(PreTrainedModel):
             assert tokenizer
             self.preparing_for_generation(tokenizer=tokenizer)
 
+        # GeSA checkpoints: single-image inference must use the same attention/positions as training
+        if self.gesa_fusion_mode != 'legacy' and not past_text:
+            if image is not None and video is None:
+                return self.predict_forward_gesa(optical=image, text=text, tokenizer=tokenizer,
+                                                 mask_prompts=mask_prompts)
+            if video is not None and len(video) == 1 and mask_prompts is None:
+                # released classification / HRBEN scripts pass one frame as a "video": one 448px tile
+                return self.predict_forward_gesa(optical=video[0], text=text, tokenizer=tokenizer, max_tiles=1)
+
         if image is None and video is None and '<image>' not in past_text:
             text = text.replace('<image>', "")
             input_text = ''
@@ -969,6 +996,140 @@ class Sa2VAChatModel(PreTrainedModel):
         return {'prediction': predict, 'prediction_masks': ret_masks,}
     
 
+
+    # ------------------------------------------------------------------------------
+    # GRSM paper: single-/cross-sensor inference with GeoSync Attention
+    # ------------------------------------------------------------------------------
+    def _gesa_fuse_block(self, vit_embeds, layout):
+        C = vit_embeds.shape[-1]
+        multi_sensor = bool(layout) and len(layout_modalities(layout)) > 1
+        if self.gesa_fusion_mode == 'avg' and multi_sensor:
+            fused = average_colocated_tokens(vit_embeds, layout, vit_embeds.shape[1])
+            return fused, [[MOD_OPT, fused.shape[0], 1]]
+        tokens = vit_embeds.reshape(-1, C)
+        if self.gesa_fusion_mode == 'external' and multi_sensor and self.external_fusion is not None:
+            tokens = self.external_fusion(tokens.unsqueeze(0)).squeeze(0)
+        return tokens, layout
+
+    def gesa_prepare_inputs(self, optical=None, sar=None, text='<image>', attn_mode=None, pos_mode=None,
+                            mask_prompts=None, max_tiles=None):
+        """Builds (inputs_embeds, position_ids, 4D mask, input_ids, layout, vis_mod).
+
+        optical: PIL image (RGB) or a list of PIL pseudo-frames (multispectral, K frames)
+        sar    : PIL SAR image (single/dual channel; zero-padded to pseudo-RGB)
+        mask_prompts: optional [np.ndarray (n_regions, H, W)] region prompts (Osprey-style <vp>
+                      tokens, built from the last tile, as in the released predict_forward); they
+                      follow the image block and stay ordinary causal tokens, as in training.
+        """
+        assert optical is not None or sar is not None
+        attn_mode = attn_mode or (self.gesa_attn_mode if self.gesa_fusion_mode != 'legacy' else 'causal')
+        pos_mode = pos_mode or (self.gesa_pos_mode if self.gesa_fusion_mode != 'legacy' else 'seq')
+        frames = []
+        if optical is not None:
+            opt_frames = optical if isinstance(optical, (list, tuple)) else [optical]
+            frames.append((MOD_OPT, [f.convert('RGB') for f in opt_frames]))
+        if sar is not None:
+            s = sar_to_pseudo_rgb(sar, self.gesa_sar_pad_mode)
+            if optical is not None and s.size != frames[0][1][0].size:
+                s = s.resize(frames[0][1][0].size)
+            frames.append((MOD_SAR, [s]))
+        tiles, tile_layout, _, _ = tile_coregistered(frames, self.min_dynamic_patch,
+                                                     max_tiles or self.max_dynamic_patch,
+                                                     self.image_size, self.use_thumbnail)
+        pixel_values = torch.stack([self.transformer(t) for t in tiles]).to(self.torch_dtype).to(self.device)
+        layout = tiles_layout_to_token_layout(tile_layout, self.patch_token)
+        vit = self.extract_feature(pixel_values).to(self.torch_dtype)
+        block, llm_layout = self._gesa_fuse_block(vit, layout)
+        image_token_str = f'{self.IMG_START_TOKEN}{self.IMG_CONTEXT_TOKEN * block.shape[0]}{self.IMG_END_TOKEN}'
+        vp_str = ''
+        if mask_prompts is not None:
+            side = int(self.image_size // self.patch_size * self.downsample_ratio)
+            mp = torch.as_tensor(np.asarray(mask_prompts[0]), dtype=torch.float32, device=vit.device)
+            mp = F.interpolate(mp.unsqueeze(0), size=(side, side), mode='nearest').squeeze(0).bool()
+            tile = vit[-1].reshape(-1, vit.shape[-1])            # last tile (thumbnail / single tile)
+            region_tokens = [tile[m.reshape(-1)] for m in mp]
+            vp_str = '\nThere are {} part regions in the picture: '.format(len(region_tokens))
+            for i, rt in enumerate(region_tokens):
+                vp_str += f'region{i + 1}{self.VP_START_TOKEN}{self.IMG_CONTEXT_TOKEN * rt.shape[0]}{self.VP_END_TOKEN}'
+                vp_str += '.\n' if i == len(region_tokens) - 1 else ', '
+            block = torch.cat([block] + region_tokens, 0)
+        prompt = self.template['INSTRUCTION'].format(input=text.replace('<image>', image_token_str + vp_str),
+                                                     round=1, bot_name=self.bot_name)
+        ids = torch.tensor(self.tokenizer.encode(prompt), device=self.device).unsqueeze(0)
+        embeds = self.language_model.get_input_embeddings()(ids).clone()
+        sel = ids[0] == self.img_context_token_id
+        assert int(sel.sum()) == block.shape[0], (int(sel.sum()), block.shape)
+        embeds[0, sel] = block.to(embeds.dtype)
+        position_ids, mask4d, vis_mod, _ = prepare_gesa_inputs(
+            ids, self.img_context_token_id, [llm_layout], None, attn_mode, pos_mode, dtype=embeds.dtype)
+        return dict(inputs_embeds=embeds, position_ids=position_ids, attention_mask_4d=mask4d,
+                    input_ids=ids, layout=layout, llm_layout=llm_layout, vis_mod=vis_mod)
+
+    @torch.no_grad()
+    def predict_forward_gesa(self, optical=None, sar=None, text=None, tokenizer=None,
+                             grounding='auto', max_new_tokens=None, attn_mode=None, pos_mode=None,
+                             return_mag=False, return_first_probs=False, mask_prompts=None, max_tiles=None):
+        """Returns {'prediction': str, 'prediction_masks': [np.ndarray (1, H, W)], ['mag': dict]}.
+        `grounding`: image given to SAM2 for [SEG] -- 'auto' (SAR when available, as in the
+        released pipeline), 'sar' or 'optical'."""
+        if not self.init_prediction_config:
+            assert tokenizer
+            self.preparing_for_generation(tokenizer=tokenizer)
+        inp = self.gesa_prepare_inputs(optical, sar, text, attn_mode, pos_mode, mask_prompts=mask_prompts,
+                                       max_tiles=max_tiles)
+        mag = None
+        if return_mag:
+            mag = self.gesa_modality_attention(inp)
+        res = gesa_greedy_generate(
+            self.language_model, inp['inputs_embeds'], inp['attention_mask_4d'], inp['position_ids'],
+            max_new_tokens=max_new_tokens or self.gen_config.max_new_tokens,
+            eos_token_ids=[self.tokenizer.eos_token_id], stop_words=self.template.get('STOP_WORDS', []),
+            tokenizer=self.tokenizer)
+        seq = res['sequences']
+        predict = self.tokenizer.decode(seq, skip_special_tokens=False).strip()
+        ret_masks = []
+        seg_sel = seq[:-1] == self.seg_token_idx
+        if seg_sel.any():
+            seg_h = self.text_hidden_fcs(res['hidden_states'][:seg_sel.shape[0]][seg_sel])
+            if grounding == 'auto':
+                grounding = 'sar' if sar is not None else 'optical'
+            if grounding == 'sar' and sar is not None:
+                g_img = sar_to_pseudo_rgb(sar, self.gesa_sar_pad_mode)
+            else:
+                g_img = optical[0] if isinstance(optical, (list, tuple)) else optical
+            g_img = g_img.convert('RGB')
+            w, h = (optical[0] if isinstance(optical, (list, tuple)) else optical).size if optical is not None else g_img.size
+            g = torch.from_numpy(self.extra_image_processor.apply_image(np.array(g_img))).permute(2, 0, 1).contiguous()
+            g_pixel_values = torch.stack([self.grounding_encoder.preprocess_image(g.to(self.torch_dtype))]).to(self.torch_dtype)
+            sam_states = self.grounding_encoder.get_sam2_embeddings(g_pixel_values)
+            for sh in seg_h:
+                pred = self.grounding_encoder.language_embd_inference(sam_states, [sh.unsqueeze(0)])
+                pred = F.interpolate(pred, size=(h, w), mode='bilinear', align_corners=False)[:, 0]
+                ret_masks.append((pred.sigmoid() > 0.5).cpu().numpy())
+        out = {'prediction': predict, 'prediction_masks': ret_masks}
+        if return_first_probs:
+            out['first_probs'] = res['first_logits'].softmax(-1)
+        if mag is not None:
+            out['mag'] = mag
+        return out
+
+    @torch.no_grad()
+    def gesa_modality_attention(self, inp):
+        """Eq. (1): per-layer text->optical / text->SAR attention shares and MAG of the prompt
+        prefill (eager attention, maps reduced on the fly)."""
+        layers = self.language_model.model.layers
+        vis_mod = inp['vis_mod']
+        vis = (vis_mod[0] > 0).nonzero().flatten()
+        text_q = torch.zeros_like(vis_mod[0], dtype=torch.bool)
+        text_q[int(vis[-1]) + 1:] = True          # instruction tokens after the image block
+        rec = ModalityAttentionRecorder([l.self_attn for l in layers], text_q.unsqueeze(0), vis_mod)
+        try:
+            self.language_model(inputs_embeds=inp['inputs_embeds'], attention_mask=inp['attention_mask_4d'],
+                                position_ids=inp['position_ids'], use_cache=False, output_attentions=True,
+                                return_dict=True)
+        finally:
+            rec.remove()
+        return rec.result()
 
     def predict_forward_multi(
             self,

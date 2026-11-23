@@ -13,3 +13,5 @@ from .Grand_Dataset import GranDDataset
 from .Osprey_Dataset import OspreyDataset, OspreyDescriptionDataset, OspreyShortDescriptionDataset
 
 from .ChatUniVi_Dataset import VideoChatUniViDataset
+
+from .gesa_datasets import GeSAPairedVQADataset, GeSAPairedRefSegDataset, GeSAMultiSpectralDataset
